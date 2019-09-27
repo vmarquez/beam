@@ -46,8 +46,8 @@ class WindowAssignTranslatorBatch<T>
       context.putDataset(output, inputDataset);
     } else {
       WindowFn<T, ?> windowFn = assignTransform.getWindowFn();
-      WindowedValue.FullWindowedValueCoder<T> windoweVdalueCoder = WindowedValue.FullWindowedValueCoder
-          .of(input.getCoder(), windowFn.windowCoder());
+      WindowedValue.FullWindowedValueCoder<T> windoweVdalueCoder =
+          WindowedValue.FullWindowedValueCoder.of(input.getCoder(), windowFn.windowCoder());
       Dataset<WindowedValue<T>> outputDataset =
           inputDataset.map(
               WindowingHelpers.assignWindowsMapFunction(windowFn),
