@@ -322,8 +322,9 @@ public class PardoCassandraIO {
           LOG.warn(
               "Only Murmur3Partitioner is supported for splitting, using an unique source for "
                   + "the read");
-          return Collections.singletonList(
-              new CassandraIO.CassandraSource<>(spec, Collections.singletonList(buildQuery(spec))));
+          return null;
+          //return Collections.singletonList(
+          //    new CassandraIO.CassandraSource<>(spec, Collections.singletonList(buildQuery(spec))));
         }
 
 
@@ -373,8 +374,6 @@ public class PardoCassandraIO {
     public void processElement(@Element Iterable<RingRange> tokens, OutputReceiver<T> receiver) {
 
       Mapper<T> mapper = getMapper(this.session, read.entity());
-      //Mapper<T> m = /manager.mapper(read.entity());
-
       String query = generateRangeQuery(this.read, "");
       PreparedStatement preparedStatement = session.prepare(query);
 
@@ -389,7 +388,7 @@ public class PardoCassandraIO {
       }
   }
 
-    private Mapper<T> getMapper(Session session, Class<T> enitity) {
+    private Mapper<T> getMapper(Session session, Class<T> entity) {
       return read.mapperFactoryFn().apply(session);
     }
 
@@ -420,86 +419,5 @@ public class PardoCassandraIO {
 
 
   }
-
-  //HOW TO STRUCTURE THE MULTIPLE CLASSES?
-
-
-  /*
-
-     SplitGenerator splitGenerator = new SplitGenerator(cluster.getMetadata().getPartitioner());
-      List<BigInteger> tokens =
-          cluster.getMetadata().getTokenRanges().stream()
-              .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
-              .collect(Collectors.toList());
-      List<List<RingRange>> splits = splitGenerator.generateSplits(numSplits, tokens);
-      LOG.info("{} splits were actually generated", splits.size());
-
-      final String partitionKey =
-          cluster.getMetadata().getKeyspace(spec.keyspace().get()).getTable(spec.table().get())
-              .getPartitionKey().stream()
-              .map(ColumnMetadata::getName)
-              .collect(Collectors.joining(","));
-
-  private static Cluster getCluster(
-      ValueProvider<List<String>> hosts,
-      ValueProvider<Integer> port,
-      ValueProvider<String> username,
-      ValueProvider<String> password,
-      ValueProvider<String> localDc,
-      ValueProvider<String> consistencyLevel) {
-    Cluster.Builder builder =
-        Cluster.builder().addContactPoints(hosts.get().toArray(new String[0])).withPort(port.get());
-
-    if (username != null) {
-      builder.withAuthProvider(new PlainTextAuthProvider(username.get(), password.get()));
-    }
-
-    DCAwareRoundRobinPolicy.Builder dcAwarePolicyBuilder = new DCAwareRoundRobinPolicy.Builder();
-    if (localDc != null) {
-      dcAwarePolicyBuilder.withLocalDc(localDc.get());
-    }
-
-    builder.withLoadBalancingPolicy(new TokenAwarePolicy(dcAwarePolicyBuilder.build()));
-
-    if (consistencyLevel != null) {
-      builder.withQueryOptions(
-          new QueryOptions().setConsistencyLevel(ConsistencyLevel.valueOf(consistencyLevel.get())));
-    }
-
-    return builder.build();
-  }*/
-  /*
-   private static String generateRangeQuery(
-        Read spec, String partitionKey, BigInteger rangeStart, BigInteger rangeEnd) {
-      final String rangeFilter =
-          Joiner.on(" AND ")
-              .skipNulls()
-              .join(
-                  rangeStart == null
-                      ? null
-                      : String.format("(token(%s) >= %d)", partitionKey, rangeStart),
-                  rangeEnd == null
-                      ? null
-                      : String.format("(token(%s) < %d)", partitionKey, rangeEnd));
-      final String query =
-          (spec.query() == null)
-              ? buildQuery(spec) + " WHERE " + rangeFilter
-              : buildQuery(spec) + " AND " + rangeFilter;
-      LOG.debug("CassandraIO generated query : {}", query);
-      return query;
-    }
-
-    private static long getNumSplits(
-        long desiredBundleSizeBytes,
-        long estimatedSizeBytes,
-        @Nullable ValueProvider<Integer> minNumberOfSplits) {
-      long numSplits =
-          desiredBundleSizeBytes > 0 ? (estimatedSizeBytes / desiredBundleSizeBytes) : 1;
-      if (numSplits <= 0) {
-        LOG.warn("Number of splits is less than 0 ({}), fallback to 1", numSplits);
-        numSplits = 1;
-      }
-      return minNumberOfSplits != n
-}*/
 
 }
