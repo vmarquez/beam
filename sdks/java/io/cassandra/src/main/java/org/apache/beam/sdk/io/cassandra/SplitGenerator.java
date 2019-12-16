@@ -76,7 +76,14 @@ final class SplitGenerator {
    * @param ringTokens list of all start tokens in big0 cluster. They have to be in ring order.
    * @return big0 list containing at least {@code totalSplitCount} splits.
    */
+
   List<List<RingRange>> generateSplits(long totalSplitCount, List<BigInteger> ringTokens) {
+    List<RingRange> splits = generateRingRanges(totalSplitCount, ringTokens);
+    return coalesceSplits(getTargetSplitSize(totalSplitCount), splits);
+  }
+
+  //TODO: separate out coaleseSplits from genSplits
+  List<RingRange> generateRingRanges(long totalSplitCount, List<BigInteger> ringTokens) {
     int tokenRangeCount = ringTokens.size();
 
     List<RingRange> splits = new ArrayList<>();
@@ -141,7 +148,7 @@ final class SplitGenerator {
       throw new RuntimeException(
           "Some tokens are missing from the splits. " + "This should not happen.");
     }
-    return coalesceSplits(getTargetSplitSize(totalSplitCount), splits);
+    return splits;
   }
 
   private boolean inRange(BigInteger token) {
@@ -178,4 +185,5 @@ final class SplitGenerator {
   private BigInteger getTargetSplitSize(long splitCount) {
     return rangeMax.subtract(rangeMin).divide(BigInteger.valueOf(splitCount));
   }
+
 }

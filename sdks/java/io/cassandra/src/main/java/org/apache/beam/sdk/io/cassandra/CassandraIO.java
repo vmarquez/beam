@@ -417,7 +417,7 @@ public class CassandraIO {
       }
     }
 
-    private static String buildQuery(Read spec) {
+    static String buildQuery(Read spec) {
       return (spec.query() == null)
           ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
           : spec.query().get().toString();
@@ -473,7 +473,7 @@ public class CassandraIO {
       return sources;
     }
 
-    private static String generateRangeQuery(
+    static String generateRangeQuery(
         Read spec, String partitionKey, BigInteger rangeStart, BigInteger rangeEnd) {
       final String rangeFilter =
           Joiner.on(" AND ")
@@ -493,7 +493,7 @@ public class CassandraIO {
       return query;
     }
 
-    private static long getNumSplits(
+    static long getNumSplits(
         long desiredBundleSizeBytes,
         long estimatedSizeBytes,
         @Nullable ValueProvider<Integer> minNumberOfSplits) {
@@ -563,7 +563,7 @@ public class CassandraIO {
      *
      * <p>NB: This method is compatible with Cassandra 2.1.5 and greater.
      */
-    private static List<TokenRange> getTokenRanges(Cluster cluster, String keyspace, String table) {
+    static List<TokenRange> getTokenRanges(Cluster cluster, String keyspace, String table) {
       try (Session session = cluster.newSession()) {
         ResultSet resultSet =
             session.execute(
@@ -1043,7 +1043,7 @@ public class CassandraIO {
   }
 
   /** Get a Cassandra cluster using hosts and port. */
-  private static Cluster getCluster(
+  static Cluster getCluster(
       ValueProvider<List<String>> hosts,
       ValueProvider<Integer> port,
       ValueProvider<String> username,

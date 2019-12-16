@@ -17,10 +17,11 @@
  */
 package org.apache.beam.sdk.io.cassandra;
 
+import java.io.Serializable;
 import java.math.BigInteger;
 
 /** Models a Cassandra token range. */
-final class RingRange {
+final class RingRange implements Serializable {
   private final BigInteger start;
   private final BigInteger end;
 
