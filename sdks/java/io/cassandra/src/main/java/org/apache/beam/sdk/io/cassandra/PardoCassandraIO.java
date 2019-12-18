@@ -260,6 +260,7 @@ public class PardoCassandraIO {
 
           SplitGenerator splitGenerator = new SplitGenerator(cluster.getMetadata().getPartitioner());
           PTransform<PCollection<Iterable<RingRange>>, PCollection<T>> transform = ParDo.<PCollection<Iterable<RingRange>>, PCollection<T>>of(new QueryFn(this));
+
           PCollection<RingRange> ranges = input.apply("Creating initial token splits", Create.of(splitGenerator.generateRingRanges(5, tokens)));
           return ranges.apply("map to grouping function", MapElements
               .into(TypeDescriptors.kvs(TypeDescriptors.integers(), TypeDescriptor
