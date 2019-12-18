@@ -3,43 +3,39 @@ package org.apache.beam.sdk.io.cassandra;
 
 */
 
-import static org.apache.beam.sdk.io.cassandra.CassandraIO.CassandraSource.buildQuery;
 import static org.apache.beam.sdk.io.cassandra.CassandraIO.CassandraSource.isMurmur3Partitioner;
 import static org.apache.beam.sdk.io.cassandra.CassandraIO.getCluster;
 import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
 
 import com.datastax.driver.core.Cluster;
 import com.datastax.driver.core.ColumnMetadata;
-import com.datastax.driver.core.ConsistencyLevel;
-import com.datastax.driver.core.PlainTextAuthProvider;
 import com.datastax.driver.core.PreparedStatement;
-import com.datastax.driver.core.QueryOptions;
 import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Session;
 import com.datastax.driver.core.Token;
-import com.datastax.driver.core.TokenRange;
-import com.datastax.driver.core.policies.DCAwareRoundRobinPolicy;
-import com.datastax.driver.core.policies.TokenAwarePolicy;
 import com.datastax.driver.mapping.MappingManager;
 import com.google.auto.value.AutoValue;
 import java.math.BigInteger;
 
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.coders.Coder;
-import org.apache.beam.sdk.io.cassandra.CassandraIO.Read;
 import org.apache.beam.sdk.io.cassandra.CassandraIO.Read.Builder;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.GroupByKey;
+import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.TypeDescriptor;
+import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -237,53 +233,6 @@ public class PardoCassandraIO {
       return builder().setMapperFactoryFn(mapperFactory).build();
     }
 
-  /*
-     private List<BoundedSource<T>> splitWithTokenRanges(
-        CassandraIO.Read<T> spec,
-        long desiredBundleSizeBytes,
-        long estimatedSizeBytes,
-        Cluster cluster) {
-      long numSplits =
-          getNumSplits(desiredBundleSizeBytes, estimatedSizeBytes, spec.minNumberOfSplits());
-      LOG.info("Number of desired splits is {}", numSplits);
-
-      SplitGenerator splitGenerator = new SplitGenerator(cluster.getMetadata().getPartitioner());
-      List<BigInteger> tokens =
-          cluster.getMetadata().getTokenRanges().stream()
-              .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
-              .collect(Collectors.toList());
-      List<List<RingRange>> splits = splitGenerator.generateSplits(numSplits, tokens);
-      LOG.info("{} splits were actually generated", splits.size());
-
-      final String partitionKey =
-          cluster.getMetadata().getKeyspace(spec.keyspace().get()).getTable(spec.table().get())
-              .getPartitionKey().stream()
-              .map(ColumnMetadata::getName)
-              .collect(Collectors.joining(","));
-
-      List<BoundedSource<T>> sources = new ArrayList<>();
-      for (List<RingRange> split : splits) {
-        List<String> queries = new ArrayList<>();
-        for (RingRange range : split) {
-          if (range.isWrapping()) {
-            // A wrapping range is one that overlaps from the end of the partitioner range and its
-            // start (ie : when the start token of the split is greater than the end token)
-            // We need to generate two queries here : one that goes from the start token to the end
-            // of
-            // the partitioner range, and the other from the start of the partitioner range to the
-            // end token of the split.
-            queries.add(generateRangeQuery(spec, partitionKey, range.getStart(), null));
-            // Generation of the second query of the wrapping range
-            queries.add(generateRangeQuery(spec, partitionKey, null, range.getEnd()));
-          } else {
-            queries.add(generateRangeQuery(spec, partitionKey, range.getStart(), range.getEnd()));
-          }
-        }
-        sources.add(new CassandraIO.CassandraSource<>(spec, queries));
-      }
-      return sources;
-    }
-   */
     @Override
     public PCollection<T> expand(PBegin input) {
       //calculate number of splits?
@@ -304,19 +253,20 @@ public class PardoCassandraIO {
         if (isMurmur3Partitioner(cluster)) {
           LOG.info("Murmur3Partitioner detected, splitting");
 
-        List<BigInteger> tokens =
-              cluster.getMetadata().getTokenRanges().stream()
-                  .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
-                  .collect(Collectors.toList());
+          List<BigInteger> tokens =
+                cluster.getMetadata().getTokenRanges().stream()
+                    .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
+                    .collect(Collectors.toList());
 
-          //PCollection<TokenRange> pTokens = Create.of(tokens);
           SplitGenerator splitGenerator = new SplitGenerator(cluster.getMetadata().getPartitioner());
-          PCollection<RingRange> ranges = input.apply("Creating initial token splits", Create.<RingRange>of(splitGenerator.generateRingRanges(5, tokens)));
-          //List<RingRange> range = generateRangeQuery(this, );
-          // TODO Auto-generated method stub
-          return input.apply("parallel querying", ParDo.of(new QueryFn(this)));
-          //return splitWithTokenRanges(
-          //    spec, desiredBundleSizeBytes, getEstimatedSizeBytes(pipelineOptions), cluster);
+          PTransform<PCollection<Iterable<RingRange>>, PCollection<T>> transform = ParDo.<PCollection<Iterable<RingRange>>, PCollection<T>>of(new QueryFn(this));
+          PCollection<RingRange> ranges = input.apply("Creating initial token splits", Create.of(splitGenerator.generateRingRanges(5, tokens)));
+          return ranges.apply("map to grouping function", MapElements
+              .into(TypeDescriptors.kvs(TypeDescriptors.integers(), TypeDescriptor
+              .of(RingRange.class))).via(rr -> KV.of(rr.getStart().intValue() % 16, rr)))
+              .apply("Grouping", GroupByKey.create())
+              .apply("map back to lists", MapElements.into(TypeDescriptors.iterables(TypeDescriptor.of(RingRange.class))).via(kv -> kv.getValue()))
+              .apply("parallel querying", transform);
 
         } else {
           LOG.warn(
@@ -330,17 +280,14 @@ public class PardoCassandraIO {
 
       }
     }
-
-
-  public static class QueryFn<T> extends DoFn<List<RingRange>, T> {
+  }
+    public static class QueryFn<T> extends DoFn<Iterable<RingRange>, T> {
 
     private final Read<T> read;
 
     transient Cluster cluster;
 
     transient Session session;
-
-    transient MappingManager manager;
 
     String partitionKey;
 
@@ -413,9 +360,6 @@ public class PardoCassandraIO {
           ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
           : spec.query().get().toString();
     }
-
-
-  }
 
 
   }
