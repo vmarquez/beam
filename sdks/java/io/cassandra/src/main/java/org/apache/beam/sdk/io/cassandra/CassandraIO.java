@@ -435,7 +435,23 @@ public class CassandraIO {
     return sources;
   }*/
 
-  private static String generateRangeQuery(
+  static String generateRangeQuery(
+      CassandraIO.Read spec, String partitionKey) {
+    final String rangeFilter =
+        Joiner.on(" AND ")
+            .skipNulls()
+            .join(
+                String.format("(token(%s) >= ?)", partitionKey),
+                String.format("(token(%s) < ?)", partitionKey));
+    final String query =
+        (spec.query() == null)
+            ? buildQuery(spec) + " WHERE " + rangeFilter
+            : buildQuery(spec) + " AND " + rangeFilter;
+    LOG.debug("CassandraIO generated query : {}", query);
+    return query;
+  }
+
+  static String generateRangeQuery(
       Read spec, String partitionKey, BigInteger rangeStart, BigInteger rangeEnd) {
     final String rangeFilter =
         Joiner.on(" AND ")
@@ -966,7 +982,7 @@ public class CassandraIO {
   }
 
   /** Get a Cassandra cluster using hosts and port. */
-  private static Cluster getCluster(
+  static Cluster getCluster(
       ValueProvider<List<String>> hosts,
       ValueProvider<Integer> port,
       ValueProvider<String> username,
