@@ -10,8 +10,12 @@ import java.util.Iterator;
 import java.util.stream.Collectors;
 import org.apache.beam.sdk.io.cassandra.CassandraIO.Read;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class ParallelQueryFn<T> extends DoFn<Iterable<RingRange>, T> {
+
+  private static final Logger LOG = LoggerFactory.getLogger(CassandraIO.class);
 
   private final Read<T> read;
 
@@ -51,8 +55,8 @@ public class ParallelQueryFn<T> extends DoFn<Iterable<RingRange>, T> {
   public void processElement(@Element Iterable<RingRange> tokens, OutputReceiver<T> receiver) {
 
     Mapper<T> mapper = read.mapperFactoryFn().apply(this.session);
-    String partitionKey = "";
     String query = Read.generateRangeQuery(this.read, partitionKey);
+    LOG.error("Error with range query, range query is " +  query);
     PreparedStatement preparedStatement = session.prepare(query);
 
     for (RingRange rr : tokens) {

@@ -46,10 +46,15 @@ import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.IterableCoder;
+import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
+import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.GroupByKey;
+import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
@@ -57,6 +62,8 @@ import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
+import org.apache.beam.sdk.values.TypeDescriptor;
+import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterators;
@@ -109,6 +116,8 @@ public class CassandraIO {
   private static final Logger LOG = LoggerFactory.getLogger(CassandraIO.class);
 
   private CassandraIO() {}
+
+  private static final String MURMUR3PARTITIONER = "org.apache.cassandra.dht.Murmur3Partitioner";
 
   /** Provide a {@link Read} {@link PTransform} to read data from a Cassandra database. */
   public static <T> Read<T> read() {
@@ -325,8 +334,40 @@ public class CassandraIO {
       checkArgument(entity() != null, "withEntity() is required");
       checkArgument(coder() != null, "withCoder() is required");
 
-      return null;
-      //return input.apply(org.apache.beam.sdk.io.Read.from(new CassandraSource<>(this, null)));
+      try (Cluster cluster =
+          getCluster(
+              hosts(),
+              port(),
+              username(),
+              password(),
+              localDc(),
+              consistencyLevel())) {
+        if (isMurmur3Partitioner(cluster)) {
+          LOG.info("Murmur3Partitioner detected, splitting");
+
+          List<BigInteger> tokens =
+              cluster.getMetadata().getTokenRanges().stream()
+                  .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
+                  .collect(Collectors.toList());
+
+          SplitGenerator splitGenerator = new SplitGenerator(
+              cluster.getMetadata().getPartitioner());
+          return input
+              .apply("Creating splits", Create.of(splitGenerator.generateSplits(10, tokens)))
+              //.setCoder(IterableCoder.of(SerializableCoder.of(RingRange.class)))
+              .apply("parallel querying", ParDo.of(new ParallelQueryFn<>(this)))
+              .setCoder(coder());
+
+
+        } else {
+          LOG.warn(
+              "Only Murmur3Partitioner is supported for splitting, using an unique source for "
+                  + "the read");
+          return null;
+          //return Collections.singletonList(
+          //    new CassandraIO.CassandraSource<>(spec, Collections.singletonList(buildQuery(spec))));
+        }
+      }
     }
 
     @AutoValue.Builder
@@ -375,7 +416,6 @@ public class CassandraIO {
   //static class CassandraSource<T> extends BoundedSource<T> {
   //  final Read<T> spec;
   //  final List<String> splitQueries;
-    private static final String MURMUR3PARTITIONER = "org.apache.cassandra.dht.Murmur3Partitioner";
 
 
 
@@ -663,8 +703,7 @@ public class CassandraIO {
         return source.spec.mapperFactoryFn().apply(session);
       }
     }*/
-  }
-
+    }
   /** Specify the mutation type: either write or delete. */
   public enum MutationType {
     WRITE,
