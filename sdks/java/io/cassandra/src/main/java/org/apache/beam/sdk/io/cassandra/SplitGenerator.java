@@ -39,7 +39,7 @@ final class SplitGenerator {
     this.partitioner = partitioner;
   }
 
-  private static BigInteger getRangeMin(String partitioner) {
+  static BigInteger getRangeMin(String partitioner) {
     if (partitioner.endsWith("RandomPartitioner")) {
       return BigInteger.ZERO;
     } else if (partitioner.endsWith("Murmur3Partitioner")) {
@@ -50,7 +50,7 @@ final class SplitGenerator {
     }
   }
 
-  private static BigInteger getRangeMax(String partitioner) {
+  static BigInteger getRangeMax(String partitioner) {
     if (partitioner.endsWith("RandomPartitioner")) {
       return new BigInteger("2").pow(127).subtract(BigInteger.ONE);
     } else if (partitioner.endsWith("Murmur3Partitioner")) {
@@ -127,7 +127,7 @@ final class SplitGenerator {
 
       // Append the splits between the endpoints
       for (int j = 0; j < splitCount; j++) {
-        splits.add(new RingRange(endpointTokens.get(j), endpointTokens.get(j + 1)));
+        splits.add(RingRange.of(endpointTokens.get(j), endpointTokens.get(j + 1)));
         LOG.debug("Split #{}: [{},{})", j + 1, endpointTokens.get(j), endpointTokens.get(j + 1));
       }
     }
