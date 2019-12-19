@@ -325,7 +325,8 @@ public class CassandraIO {
       checkArgument(entity() != null, "withEntity() is required");
       checkArgument(coder() != null, "withCoder() is required");
 
-      return input.apply(org.apache.beam.sdk.io.Read.from(new CassandraSource<>(this, null)));
+      return null;
+      //return input.apply(org.apache.beam.sdk.io.Read.from(new CassandraSource<>(this, null)));
     }
 
     @AutoValue.Builder
@@ -369,260 +370,181 @@ public class CassandraIO {
         return autoBuild();
       }
     }
-  }
 
-  @VisibleForTesting
-  static class CassandraSource<T> extends BoundedSource<T> {
-    final Read<T> spec;
-    final List<String> splitQueries;
+  //@VisibleForTesting
+  //static class CassandraSource<T> extends BoundedSource<T> {
+  //  final Read<T> spec;
+  //  final List<String> splitQueries;
     private static final String MURMUR3PARTITIONER = "org.apache.cassandra.dht.Murmur3Partitioner";
 
-    CassandraSource(Read<T> spec, List<String> splitQueries) {
-      this.spec = spec;
-      this.splitQueries = splitQueries;
-    }
 
-    @Override
-    public Coder<T> getOutputCoder() {
-      return spec.coder();
-    }
 
-    @Override
-    public BoundedReader<T> createReader(PipelineOptions pipelineOptions) {
-      return new CassandraReader(this);
-    }
+  private static String buildQuery(Read spec) {
+    return (spec.query() == null)
+        ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
+        : spec.query().get().toString();
+  }
 
-    @Override
-    public List<BoundedSource<T>> split(
-        long desiredBundleSizeBytes, PipelineOptions pipelineOptions) {
-      try (Cluster cluster =
-          getCluster(
-              spec.hosts(),
-              spec.port(),
-              spec.username(),
-              spec.password(),
-              spec.localDc(),
-              spec.consistencyLevel())) {
-        if (isMurmur3Partitioner(cluster)) {
-          LOG.info("Murmur3Partitioner detected, splitting");
-          return splitWithTokenRanges(
-              spec, desiredBundleSizeBytes, getEstimatedSizeBytes(pipelineOptions), cluster);
+
+    //Compute the number of splits based on the estimated size and the desired bundle size, and
+    //create several sources.
+  /*
+  private List<BoundedSource<T>> splitWithTokenRanges(
+      CassandraIO.Read<T> spec,
+      long desiredBundleSizeBytes,
+      long estimatedSizeBytes,
+      Cluster cluster) {
+    long numSplits =
+        getNumSplits(desiredBundleSizeBytes, estimatedSizeBytes, spec.minNumberOfSplits());
+    LOG.info("Number of desired splits is {}", numSplits);
+
+    SplitGenerator splitGenerator = new SplitGenerator(cluster.getMetadata().getPartitioner());
+    List<BigInteger> tokens =
+        cluster.getMetadata().getTokenRanges().stream()
+            .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
+            .collect(Collectors.toList());
+    List<List<RingRange>> splits = splitGenerator.generateSplits(numSplits, tokens);
+    LOG.info("{} splits were actually generated", splits.size());
+
+    final String partitionKey =
+        cluster.getMetadata().getKeyspace(spec.keyspace().get()).getTable(spec.table().get())
+            .getPartitionKey().stream()
+            .map(ColumnMetadata::getName)
+            .collect(Collectors.joining(","));
+
+    List<BoundedSource<T>> sources = new ArrayList<>();
+    for (List<RingRange> split : splits) {
+      List<String> queries = new ArrayList<>();
+      for (RingRange range : split) {
+        if (range.isWrapping()) {
+          // A wrapping range is one that overlaps from the end of the partitioner range and its
+          // start (ie : when the start token of the split is greater than the end token)
+          // We need to generate two queries here : one that goes from the start token to the end
+          // of
+          // the partitioner range, and the other from the start of the partitioner range to the
+          // end token of the split.
+          queries.add(generateRangeQuery(spec, partitionKey, range.getStart(), null));
+          // Generation of the second query of the wrapping range
+          queries.add(generateRangeQuery(spec, partitionKey, null, range.getEnd()));
         } else {
-          LOG.warn(
-              "Only Murmur3Partitioner is supported for splitting, using a unique source for "
-                  + "the read");
-          return Collections.singletonList(
-              new CassandraIO.CassandraSource<>(spec, Collections.singletonList(buildQuery(spec))));
+          queries.add(generateRangeQuery(spec, partitionKey, range.getStart(), range.getEnd()));
         }
       }
+      sources.add(new CassandraIO.CassandraSource<>(spec, queries));
     }
+    return sources;
+  }*/
 
-    private static String buildQuery(Read spec) {
-      return (spec.query() == null)
-          ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
-          : spec.query().get().toString();
+  private static String generateRangeQuery(
+      Read spec, String partitionKey, BigInteger rangeStart, BigInteger rangeEnd) {
+    final String rangeFilter =
+        Joiner.on(" AND ")
+            .skipNulls()
+            .join(
+                rangeStart == null
+                    ? null
+                    : String.format("(token(%s) >= %d)", partitionKey, rangeStart),
+                rangeEnd == null
+                    ? null
+                    : String.format("(token(%s) < %d)", partitionKey, rangeEnd));
+    final String query =
+        (spec.query() == null)
+            ? buildQuery(spec) + " WHERE " + rangeFilter
+            : buildQuery(spec) + " AND " + rangeFilter;
+    LOG.debug("CassandraIO generated query : {}", query);
+    return query;
+  }
+
+  private static long getNumSplits(
+      long desiredBundleSizeBytes,
+      long estimatedSizeBytes,
+      @Nullable ValueProvider<Integer> minNumberOfSplits) {
+    long numSplits =
+        desiredBundleSizeBytes > 0 ? (estimatedSizeBytes / desiredBundleSizeBytes) : 1;
+    if (numSplits <= 0) {
+      LOG.warn("Number of splits is less than 0 ({}), fallback to 1", numSplits);
+      numSplits = 1;
     }
+    return minNumberOfSplits != null ? Math.max(numSplits, minNumberOfSplits.get()) : numSplits;
+  }
 
-    /**
-     * Compute the number of splits based on the estimated size and the desired bundle size, and
-     * create several sources.
-     */
-    private List<BoundedSource<T>> splitWithTokenRanges(
-        CassandraIO.Read<T> spec,
-        long desiredBundleSizeBytes,
-        long estimatedSizeBytes,
-        Cluster cluster) {
-      long numSplits =
-          getNumSplits(desiredBundleSizeBytes, estimatedSizeBytes, spec.minNumberOfSplits());
-      LOG.info("Number of desired splits is {}", numSplits);
 
-      SplitGenerator splitGenerator = new SplitGenerator(cluster.getMetadata().getPartitioner());
-      List<BigInteger> tokens =
-          cluster.getMetadata().getTokenRanges().stream()
-              .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
-              .collect(Collectors.toList());
-      List<List<RingRange>> splits = splitGenerator.generateSplits(numSplits, tokens);
-      LOG.info("{} splits were actually generated", splits.size());
 
-      final String partitionKey =
-          cluster.getMetadata().getKeyspace(spec.keyspace().get()).getTable(spec.table().get())
-              .getPartitionKey().stream()
-              .map(ColumnMetadata::getName)
-              .collect(Collectors.joining(","));
+  @VisibleForTesting
+  static long getEstimatedSizeBytesFromTokenRanges(List<TokenRange> tokenRanges) {
+    long size = 0L;
+    for (TokenRange tokenRange : tokenRanges) {
+      size = size + tokenRange.meanPartitionSize * tokenRange.partitionCount;
+    }
+    return Math.round(size / getRingFraction(tokenRanges));
+  }
+  // ------------- CASSANDRA SOURCE UTIL METHODS ---------------//
 
-      List<BoundedSource<T>> sources = new ArrayList<>();
-      for (List<RingRange> split : splits) {
-        List<String> queries = new ArrayList<>();
-        for (RingRange range : split) {
-          if (range.isWrapping()) {
-            // A wrapping range is one that overlaps from the end of the partitioner range and its
-            // start (ie : when the start token of the split is greater than the end token)
-            // We need to generate two queries here : one that goes from the start token to the end
-            // of
-            // the partitioner range, and the other from the start of the partitioner range to the
-            // end token of the split.
-            queries.add(generateRangeQuery(spec, partitionKey, range.getStart(), null));
-            // Generation of the second query of the wrapping range
-            queries.add(generateRangeQuery(spec, partitionKey, null, range.getEnd()));
-          } else {
-            queries.add(generateRangeQuery(spec, partitionKey, range.getStart(), range.getEnd()));
-          }
-        }
-        sources.add(new CassandraIO.CassandraSource<>(spec, queries));
+  /**
+   * Gets the list of token ranges that a table occupies on a give Cassandra node.
+   *
+   * <p>NB: This method is compatible with Cassandra 2.1.5 and greater.
+   */
+  private static List<TokenRange> getTokenRanges(Cluster cluster, String keyspace, String table) {
+    try (Session session = cluster.newSession()) {
+      ResultSet resultSet =
+          session.execute(
+              "SELECT range_start, range_end, partitions_count, mean_partition_size FROM "
+                  + "system.size_estimates WHERE keyspace_name = ? AND table_name = ?",
+              keyspace,
+              table);
+
+      ArrayList<TokenRange> tokenRanges = new ArrayList<>();
+      for (Row row : resultSet) {
+        TokenRange tokenRange =
+            new TokenRange(
+                row.getLong("partitions_count"),
+                row.getLong("mean_partition_size"),
+                new BigInteger(row.getString("range_start")),
+                new BigInteger(row.getString("range_end")));
+        tokenRanges.add(tokenRange);
       }
-      return sources;
+      // The table may not contain the estimates yet
+      // or have partitions_count and mean_partition_size fields = 0
+      // if the data was just inserted and the amount of data in the table was small.
+      // This is very common situation during tests,
+      // when we insert a few rows and immediately query them.
+      // However, for tiny data sets the lack of size estimates is not a problem at all,
+      // because we don't want to split tiny data anyways.
+      // Therefore, we're not issuing a warning if the result set was empty
+      // or mean_partition_size and partitions_count = 0.
+      return tokenRanges;
     }
+  }
 
-    private static String generateRangeQuery(
-        Read spec, String partitionKey, BigInteger rangeStart, BigInteger rangeEnd) {
-      final String rangeFilter =
-          Joiner.on(" AND ")
-              .skipNulls()
-              .join(
-                  rangeStart == null
-                      ? null
-                      : String.format("(token(%s) >= %d)", partitionKey, rangeStart),
-                  rangeEnd == null
-                      ? null
-                      : String.format("(token(%s) < %d)", partitionKey, rangeEnd));
-      final String query =
-          (spec.query() == null)
-              ? buildQuery(spec) + " WHERE " + rangeFilter
-              : buildQuery(spec) + " AND " + rangeFilter;
-      LOG.debug("CassandraIO generated query : {}", query);
-      return query;
+  /** Compute the percentage of token addressed compared with the whole tokens in the cluster. */
+  @VisibleForTesting
+  static double getRingFraction(List<TokenRange> tokenRanges) {
+    double ringFraction = 0;
+    for (TokenRange tokenRange : tokenRanges) {
+      ringFraction =
+          ringFraction
+              + (distance(tokenRange.rangeStart, tokenRange.rangeEnd).doubleValue()
+                  / SplitGenerator.getRangeSize(MURMUR3PARTITIONER).doubleValue());
     }
+    return ringFraction;
+  }
 
-    private static long getNumSplits(
-        long desiredBundleSizeBytes,
-        long estimatedSizeBytes,
-        @Nullable ValueProvider<Integer> minNumberOfSplits) {
-      long numSplits =
-          desiredBundleSizeBytes > 0 ? (estimatedSizeBytes / desiredBundleSizeBytes) : 1;
-      if (numSplits <= 0) {
-        LOG.warn("Number of splits is less than 0 ({}), fallback to 1", numSplits);
-        numSplits = 1;
-      }
-      return minNumberOfSplits != null ? Math.max(numSplits, minNumberOfSplits.get()) : numSplits;
-    }
+  /**
+   * Check if the current partitioner is the Murmur3 (default in Cassandra version newer than 2).
+   */
+  @VisibleForTesting
+  static boolean isMurmur3Partitioner(Cluster cluster) {
+    return MURMUR3PARTITIONER.equals(cluster.getMetadata().getPartitioner());
+  }
 
-    @Override
-    public long getEstimatedSizeBytes(PipelineOptions pipelineOptions) {
-      try (Cluster cluster =
-          getCluster(
-              spec.hosts(),
-              spec.port(),
-              spec.username(),
-              spec.password(),
-              spec.localDc(),
-              spec.consistencyLevel())) {
-        if (isMurmur3Partitioner(cluster)) {
-          try {
-            List<TokenRange> tokenRanges =
-                getTokenRanges(cluster, spec.keyspace().get(), spec.table().get());
-            return getEstimatedSizeBytesFromTokenRanges(tokenRanges);
-          } catch (Exception e) {
-            LOG.warn("Can't estimate the size", e);
-            return 0L;
-          }
-        } else {
-          LOG.warn("Only Murmur3 partitioner is supported, can't estimate the size");
-          return 0L;
-        }
-      }
-    }
-
-    @VisibleForTesting
-    static long getEstimatedSizeBytesFromTokenRanges(List<TokenRange> tokenRanges) {
-      long size = 0L;
-      for (TokenRange tokenRange : tokenRanges) {
-        size = size + tokenRange.meanPartitionSize * tokenRange.partitionCount;
-      }
-      return Math.round(size / getRingFraction(tokenRanges));
-    }
-
-    @Override
-    public void populateDisplayData(DisplayData.Builder builder) {
-      super.populateDisplayData(builder);
-      if (spec.hosts() != null) {
-        builder.add(DisplayData.item("hosts", spec.hosts().toString()));
-      }
-      if (spec.port() != null) {
-        builder.add(DisplayData.item("port", spec.port()));
-      }
-      builder.addIfNotNull(DisplayData.item("keyspace", spec.keyspace()));
-      builder.addIfNotNull(DisplayData.item("table", spec.table()));
-      builder.addIfNotNull(DisplayData.item("username", spec.username()));
-      builder.addIfNotNull(DisplayData.item("localDc", spec.localDc()));
-      builder.addIfNotNull(DisplayData.item("consistencyLevel", spec.consistencyLevel()));
-    }
-    // ------------- CASSANDRA SOURCE UTIL METHODS ---------------//
-
-    /**
-     * Gets the list of token ranges that a table occupies on a give Cassandra node.
-     *
-     * <p>NB: This method is compatible with Cassandra 2.1.5 and greater.
-     */
-    private static List<TokenRange> getTokenRanges(Cluster cluster, String keyspace, String table) {
-      try (Session session = cluster.newSession()) {
-        ResultSet resultSet =
-            session.execute(
-                "SELECT range_start, range_end, partitions_count, mean_partition_size FROM "
-                    + "system.size_estimates WHERE keyspace_name = ? AND table_name = ?",
-                keyspace,
-                table);
-
-        ArrayList<TokenRange> tokenRanges = new ArrayList<>();
-        for (Row row : resultSet) {
-          TokenRange tokenRange =
-              new TokenRange(
-                  row.getLong("partitions_count"),
-                  row.getLong("mean_partition_size"),
-                  new BigInteger(row.getString("range_start")),
-                  new BigInteger(row.getString("range_end")));
-          tokenRanges.add(tokenRange);
-        }
-        // The table may not contain the estimates yet
-        // or have partitions_count and mean_partition_size fields = 0
-        // if the data was just inserted and the amount of data in the table was small.
-        // This is very common situation during tests,
-        // when we insert a few rows and immediately query them.
-        // However, for tiny data sets the lack of size estimates is not a problem at all,
-        // because we don't want to split tiny data anyways.
-        // Therefore, we're not issuing a warning if the result set was empty
-        // or mean_partition_size and partitions_count = 0.
-        return tokenRanges;
-      }
-    }
-
-    /** Compute the percentage of token addressed compared with the whole tokens in the cluster. */
-    @VisibleForTesting
-    static double getRingFraction(List<TokenRange> tokenRanges) {
-      double ringFraction = 0;
-      for (TokenRange tokenRange : tokenRanges) {
-        ringFraction =
-            ringFraction
-                + (distance(tokenRange.rangeStart, tokenRange.rangeEnd).doubleValue()
-                    / SplitGenerator.getRangeSize(MURMUR3PARTITIONER).doubleValue());
-      }
-      return ringFraction;
-    }
-
-    /**
-     * Check if the current partitioner is the Murmur3 (default in Cassandra version newer than 2).
-     */
-    @VisibleForTesting
-    static boolean isMurmur3Partitioner(Cluster cluster) {
-      return MURMUR3PARTITIONER.equals(cluster.getMetadata().getPartitioner());
-    }
-
-    /** Measure distance between two tokens. */
-    @VisibleForTesting
-    static BigInteger distance(BigInteger left, BigInteger right) {
-      return (right.compareTo(left) > 0)
-          ? right.subtract(left)
-          : right.subtract(left).add(SplitGenerator.getRangeSize(MURMUR3PARTITIONER));
-    }
+  /** Measure distance between two tokens. */
+  @VisibleForTesting
+  static BigInteger distance(BigInteger left, BigInteger right) {
+    return (right.compareTo(left) > 0)
+        ? right.subtract(left)
+        : right.subtract(left).add(SplitGenerator.getRangeSize(MURMUR3PARTITIONER));
+  }
 
     /**
      * Represent a token range in Cassandra instance, wrapping the partition count, size and token
@@ -644,6 +566,7 @@ public class CassandraIO {
       }
     }
 
+    /*
     private class CassandraReader extends BoundedSource.BoundedReader<T> {
       private final CassandraIO.CassandraSource<T> source;
       private Cluster cluster;
@@ -723,7 +646,7 @@ public class CassandraIO {
       private Mapper<T> getMapper(Session session, Class<T> enitity) {
         return source.spec.mapperFactoryFn().apply(session);
       }
-    }
+    }*/
   }
 
   /** Specify the mutation type: either write or delete. */
