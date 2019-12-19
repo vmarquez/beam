@@ -18,22 +18,20 @@
 package org.apache.beam.sdk.io.cassandra;
 
 import static junit.framework.TestCase.assertTrue;
-import static org.apache.beam.sdk.io.cassandra.CassandraIO.CassandraSource.distance;
-import static org.apache.beam.sdk.io.cassandra.CassandraIO.CassandraSource.getEstimatedSizeBytesFromTokenRanges;
-import static org.apache.beam.sdk.io.cassandra.CassandraIO.CassandraSource.getRingFraction;
-import static org.apache.beam.sdk.io.cassandra.CassandraIO.CassandraSource.isMurmur3Partitioner;
-import static org.apache.beam.sdk.testing.SourceTestUtils.readFromSource;
-import static org.hamcrest.Matchers.lessThan;
+import static org.apache.beam.sdk.io.cassandra.CassandraIO.Read.distance;
+import static org.apache.beam.sdk.io.cassandra.CassandraIO.Read.getRingFraction;
+import static org.apache.beam.sdk.io.cassandra.CassandraIO.isMurmur3Partitioner;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThat;
 
 import com.datastax.driver.core.Cluster;
+import com.datastax.driver.core.ProtocolVersion;
 import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Row;
 import com.datastax.driver.core.Session;
+import com.datastax.driver.core.TypeCodec;
 import com.datastax.driver.core.exceptions.NoHostAvailableException;
-import com.datastax.driver.core.querybuilder.QueryBuilder;
+import com.datastax.driver.mapping.annotations.ClusteringColumn;
 import com.datastax.driver.mapping.annotations.Column;
 import com.datastax.driver.mapping.annotations.Computed;
 import com.datastax.driver.mapping.annotations.PartitionKey;
@@ -44,10 +42,12 @@ import java.io.File;
 import java.io.IOException;
 import java.io.Serializable;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -61,13 +61,9 @@ import javax.management.remote.JMXConnector;
 import javax.management.remote.JMXConnectorFactory;
 import javax.management.remote.JMXServiceURL;
 import org.apache.beam.sdk.coders.SerializableCoder;
-import org.apache.beam.sdk.io.BoundedSource;
-import org.apache.beam.sdk.io.cassandra.CassandraIO.CassandraSource.TokenRange;
+import org.apache.beam.sdk.io.cassandra.CassandraIO.TokenRange;
 import org.apache.beam.sdk.io.common.NetworkTestHelper;
-import org.apache.beam.sdk.options.PipelineOptions;
-import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.testing.PAssert;
-import org.apache.beam.sdk.testing.SourceTestUtils;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.transforms.Count;
 import org.apache.beam.sdk.transforms.Create;
@@ -177,39 +173,44 @@ public class CassandraIOTest implements Serializable {
     LOGGER.info("Create Cassandra tables");
     session.execute(
         String.format(
-            "CREATE TABLE IF NOT EXISTS %s.%s(person_id int, person_name text, PRIMARY KEY"
-                + "(person_id));",
+            "CREATE TABLE IF NOT EXISTS %s.%s(person_department text, person_id int, person_name text, PRIMARY KEY"
+                + "((person_department), person_id));",
             CASSANDRA_KEYSPACE, CASSANDRA_TABLE));
     session.execute(
         String.format(
-            "CREATE TABLE IF NOT EXISTS %s.%s(person_id int, person_name text, PRIMARY KEY"
-                + "(person_id));",
+            "CREATE TABLE IF NOT EXISTS %s.%s(person_department text, person_id int, person_name text, PRIMARY KEY"
+                + "((person_department), person_id));",
             CASSANDRA_KEYSPACE, CASSANDRA_TABLE_WRITE));
 
     LOGGER.info("Insert records");
-    String[] scientists = {
-      "Einstein",
-      "Darwin",
-      "Copernicus",
-      "Pasteur",
-      "Curie",
-      "Faraday",
-      "Newton",
-      "Bohr",
-      "Galilei",
-      "Maxwell"
+    String[][] scientists = {
+      new String[] {"phys", "Einstein"},
+      new String[] {"bio", "Darwin"},
+      new String[] {"phys", "Copernicus"},
+      new String[] {"bio", "Pasteur"},
+      new String[] {"bio", "Curie"},
+      new String[] {"phys", "Faraday"},
+      new String[] {"math", "Newton"},
+      new String[] {"phys", "Bohr"},
+      new String[] {"phys", "Galilei"},
+      new String[] {"math", "Maxwell"},
     };
     for (int i = 0; i < NUM_ROWS; i++) {
       int index = i % scientists.length;
-      session.execute(
+      String insertStr =
           String.format(
-              "INSERT INTO %s.%s(person_id, person_name) values("
+              "INSERT INTO %s.%s(person_department, person_id, person_name) values("
+                  + "'"
+                  + scientists[index][0]
+                  + "', "
                   + i
                   + ", '"
-                  + scientists[index]
+                  + scientists[index][1]
                   + "');",
               CASSANDRA_KEYSPACE,
-              CASSANDRA_TABLE));
+              CASSANDRA_TABLE);
+      LOGGER.error("Error with str = " + insertStr);
+      session.execute(insertStr);
     }
     flushMemTables();
   }
@@ -263,21 +264,6 @@ public class CassandraIOTest implements Serializable {
   }
 
   @Test
-  public void testEstimatedSizeBytes() throws Exception {
-    PipelineOptions pipelineOptions = PipelineOptionsFactory.create();
-    CassandraIO.Read<Scientist> read =
-        CassandraIO.<Scientist>read()
-            .withHosts(Collections.singletonList(CASSANDRA_HOST))
-            .withPort(cassandraPort)
-            .withKeyspace(CASSANDRA_KEYSPACE)
-            .withTable(CASSANDRA_TABLE);
-    CassandraIO.CassandraSource<Scientist> source = new CassandraIO.CassandraSource<>(read, null);
-    long estimatedSizeBytes = source.getEstimatedSizeBytes(pipelineOptions);
-    // the size is non determanistic in Cassandra backend
-    assertTrue((estimatedSizeBytes >= 12960L * 0.9f) && (estimatedSizeBytes <= 12960L * 1.1f));
-  }
-
-  @Test
   public void testRead() throws Exception {
     PCollection<Scientist> output =
         pipeline.apply(
@@ -313,6 +299,52 @@ public class CassandraIOTest implements Serializable {
   }
 
   @Test
+  public void testReadAll() {
+
+    RingRange bioRR =
+        tokenBytesToRingRange(TypeCodec.varchar().serialize("bio", ProtocolVersion.V3));
+    RingRange mathRR =
+        tokenBytesToRingRange(TypeCodec.varchar().serialize("math", ProtocolVersion.V3));
+
+    PCollection<Scientist> output =
+        pipeline
+            .apply(Create.of(bioRR, mathRR))
+            .apply(
+                CassandraIO.<Scientist>readAll()
+                    .withSlitCount(2)
+                    .withHosts(Collections.singletonList(CASSANDRA_HOST))
+                    .withPort(cassandraPort)
+                    .withKeyspace(CASSANDRA_KEYSPACE)
+                    .withTable(CASSANDRA_TABLE)
+                    .withCoder(SerializableCoder.of(Scientist.class))
+                    .withEntity(Scientist.class));
+
+    PCollection<KV<String, Integer>> mapped =
+        output.apply(
+            MapElements.via(
+                new SimpleFunction<Scientist, KV<String, Integer>>() {
+                  @Override
+                  public KV<String, Integer> apply(Scientist scientist) {
+                    return KV.of(scientist.department, scientist.id);
+                  }
+                }));
+    PAssert.that(mapped.apply("Count occurrences per scientist", Count.perKey()))
+        .satisfies(
+            input -> {
+              HashMap<String, Long> map = new HashMap<>();
+              for (KV<String, Long> element : input) {
+                map.put(element.getKey(), element.getValue());
+              }
+              assertTrue(map.size() == 2);
+              assertEquals(map.get("bio"), 6L, 0L);
+              assertEquals(map.get("math"), 4L, 0L);
+              return null;
+            });
+
+    pipeline.run();
+  }
+
+  @Test
   public void testReadWithQuery() throws Exception {
     PCollection<Scientist> output =
         pipeline.apply(
@@ -322,7 +354,7 @@ public class CassandraIOTest implements Serializable {
                 .withKeyspace(CASSANDRA_KEYSPACE)
                 .withTable(CASSANDRA_TABLE)
                 .withQuery(
-                    "select person_id, writetime(person_name) from beam_ks.scientist where person_id=10")
+                    "select person_id, writetime(person_name) from beam_ks.scientist where person_id=10 AND person_department='phys'")
                 .withCoder(SerializableCoder.of(Scientist.class))
                 .withEntity(Scientist.class));
 
@@ -347,6 +379,7 @@ public class CassandraIOTest implements Serializable {
       ScientistWrite scientist = new ScientistWrite();
       scientist.id = i;
       scientist.name = "Name " + i;
+      scientist.department = "bio";
       data.add(scientist);
     }
 
@@ -387,6 +420,7 @@ public class CassandraIOTest implements Serializable {
 
     @Override
     public Iterator map(ResultSet resultSet) {
+
       if (!resultSet.isExhausted()) {
         resultSet.iterator().forEachRemaining(r -> counter.getAndIncrement());
       }
@@ -466,40 +500,9 @@ public class CassandraIOTest implements Serializable {
     assertEquals(1, counter.intValue());
   }
 
-  @Test
-  public void testSplit() throws Exception {
-    PipelineOptions options = PipelineOptionsFactory.create();
-    CassandraIO.Read<Scientist> read =
-        CassandraIO.<Scientist>read()
-            .withHosts(Collections.singletonList(CASSANDRA_HOST))
-            .withPort(cassandraPort)
-            .withKeyspace(CASSANDRA_KEYSPACE)
-            .withTable(CASSANDRA_TABLE)
-            .withEntity(Scientist.class)
-            .withCoder(SerializableCoder.of(Scientist.class));
-
-    // initialSource will be read without splitting (which does not happen in production)
-    // so we need to provide splitQueries to avoid NPE in source.reader.start()
-    String splitQuery = QueryBuilder.select().from(CASSANDRA_KEYSPACE, CASSANDRA_TABLE).toString();
-    CassandraIO.CassandraSource<Scientist> initialSource =
-        new CassandraIO.CassandraSource<>(read, Collections.singletonList(splitQuery));
-    int desiredBundleSizeBytes = 2048;
-    List<BoundedSource<Scientist>> splits = initialSource.split(desiredBundleSizeBytes, options);
-    SourceTestUtils.assertSourcesEqualReferenceSource(initialSource, splits, options);
-    float expectedNumSplitsloat =
-        (float) initialSource.getEstimatedSizeBytes(options) / desiredBundleSizeBytes;
-    int expectedNumSplits = (int) Math.ceil(expectedNumSplitsloat);
-    assertEquals("Wrong number of splits", expectedNumSplits, splits.size());
-    int emptySplits = 0;
-    for (BoundedSource<Scientist> subSource : splits) {
-      if (readFromSource(subSource, options).isEmpty()) {
-        emptySplits += 1;
-      }
-    }
-    assertThat(
-        "There are too many empty splits, parallelism is sub-optimal",
-        emptySplits,
-        lessThan((int) (ACCEPTABLE_EMPTY_SPLITS_PERCENTAGE * splits.size())));
+  private RingRange tokenBytesToRingRange(ByteBuffer bb) {
+    BigInteger bi = BigInteger.valueOf((long) cluster.getMetadata().newToken(bb).getValue());
+    return new RingRange(bi, bi.add(BigInteger.valueOf(1L)));
   }
 
   private List<Row> getRows(String table) {
@@ -509,6 +512,7 @@ public class CassandraIOTest implements Serializable {
     return result.all();
   }
 
+  // TEMP TEST
   @Test
   public void testDelete() throws Exception {
     List<Row> results = getRows(CASSANDRA_TABLE);
@@ -516,6 +520,7 @@ public class CassandraIOTest implements Serializable {
 
     Scientist einstein = new Scientist();
     einstein.id = 0;
+    einstein.department = "phys";
     einstein.name = "Einstein";
     pipeline
         .apply(Create.of(einstein))
@@ -532,7 +537,8 @@ public class CassandraIOTest implements Serializable {
     // re-insert suppressed doc to make the test autonomous
     session.execute(
         String.format(
-            "INSERT INTO %s.%s(person_id, person_name) values("
+            "INSERT INTO %s.%s(person_department, person_id, person_name) values("
+                + "'phys', "
                 + einstein.id
                 + ", '"
                 + einstein.name
@@ -548,11 +554,11 @@ public class CassandraIOTest implements Serializable {
 
   @Test
   public void testDistance() {
-    BigInteger distance = distance(new BigInteger("10"), new BigInteger("100"));
-    assertEquals(BigInteger.valueOf(90), distance);
+    BigInteger dist = distance(new BigInteger("10"), new BigInteger("100"));
+    assertEquals(BigInteger.valueOf(90), dist);
 
-    distance = distance(new BigInteger("100"), new BigInteger("10"));
-    assertEquals(new BigInteger("18446744073709551526"), distance);
+    dist = distance(new BigInteger("100"), new BigInteger("10"));
+    assertEquals(new BigInteger("18446744073709551526"), dist);
   }
 
   @Test
@@ -567,32 +573,6 @@ public class CassandraIOTest implements Serializable {
     assertEquals(1.0, getRingFraction(tokenRanges), 0);
   }
 
-  @Test
-  public void testEstimatedSizeBytesFromTokenRanges() {
-    List<TokenRange> tokenRanges = new ArrayList<>();
-    // one partition containing all tokens, the size is actually the size of the partition
-    tokenRanges.add(
-        new TokenRange(
-            1, 1000, BigInteger.valueOf(Long.MIN_VALUE), BigInteger.valueOf(Long.MAX_VALUE)));
-    assertEquals(1000, getEstimatedSizeBytesFromTokenRanges(tokenRanges));
-
-    // one partition with half of the tokens, we estimate the size to the double of this partition
-    tokenRanges = new ArrayList<>();
-    tokenRanges.add(
-        new TokenRange(1, 1000, BigInteger.valueOf(Long.MIN_VALUE), new BigInteger("0")));
-    assertEquals(2000, getEstimatedSizeBytesFromTokenRanges(tokenRanges));
-
-    // we have three partitions covering all tokens, the size is the sum of partition size *
-    // partition count
-    tokenRanges = new ArrayList<>();
-    tokenRanges.add(
-        new TokenRange(1, 1000, BigInteger.valueOf(Long.MIN_VALUE), new BigInteger("-3")));
-    tokenRanges.add(new TokenRange(1, 1000, new BigInteger("-2"), new BigInteger("10000")));
-    tokenRanges.add(
-        new TokenRange(2, 3000, new BigInteger("10001"), BigInteger.valueOf(Long.MAX_VALUE)));
-    assertEquals(8000, getEstimatedSizeBytesFromTokenRanges(tokenRanges));
-  }
-
   /** Simple Cassandra entity used in read tests. */
   @Table(name = CASSANDRA_TABLE, keyspace = CASSANDRA_KEYSPACE)
   static class Scientist implements Serializable {
@@ -603,9 +583,13 @@ public class CassandraIOTest implements Serializable {
     @Computed("writetime(person_name)")
     Long nameTs;
 
-    @PartitionKey()
+    @ClusteringColumn()
     @Column(name = "person_id")
     int id;
+
+    @PartitionKey
+    @Column(name = "person_department")
+    String department;
 
     @Override
     public String toString() {
@@ -621,7 +605,9 @@ public class CassandraIOTest implements Serializable {
         return false;
       }
       Scientist scientist = (Scientist) o;
-      return id == scientist.id && Objects.equal(name, scientist.name);
+      return id == scientist.id
+          && Objects.equal(name, scientist.name)
+          && Objects.equal(department, scientist.department);
     }
 
     @Override

@@ -39,7 +39,7 @@ final class SplitGenerator {
     this.partitioner = partitioner;
   }
 
-  private static BigInteger getRangeMin(String partitioner) {
+  static BigInteger getRangeMin(String partitioner) {
     if (partitioner.endsWith("RandomPartitioner")) {
       return BigInteger.ZERO;
     } else if (partitioner.endsWith("Murmur3Partitioner")) {
@@ -50,7 +50,7 @@ final class SplitGenerator {
     }
   }
 
-  private static BigInteger getRangeMax(String partitioner) {
+  static BigInteger getRangeMax(String partitioner) {
     if (partitioner.endsWith("RandomPartitioner")) {
       return new BigInteger("2").pow(127).subtract(BigInteger.ONE);
     } else if (partitioner.endsWith("Murmur3Partitioner")) {
