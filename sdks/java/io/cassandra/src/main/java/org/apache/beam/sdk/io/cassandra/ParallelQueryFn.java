@@ -8,7 +8,6 @@ import com.datastax.driver.core.Session;
 import com.datastax.driver.core.Token;
 import java.util.Iterator;
 import java.util.stream.Collectors;
-import org.apache.beam.sdk.io.cassandra.CassandraIO.Read;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,15 +16,15 @@ public class ParallelQueryFn<T> extends DoFn<Iterable<RingRange>, T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(CassandraIO.class);
 
-  private final Read<T> read;
+  private final CassandraInfo<T> read;
 
-  transient Cluster cluster;
+  private transient Cluster cluster;
 
-  transient Session session;
+  private transient Session session;
 
-  String partitionKey;
+  private String partitionKey;
 
-  public ParallelQueryFn(Read<T> read) {
+  public ParallelQueryFn(CassandraInfo<T> read) {
     this.read = read;
   }
 
@@ -55,7 +54,7 @@ public class ParallelQueryFn<T> extends DoFn<Iterable<RingRange>, T> {
   public void processElement(@Element Iterable<RingRange> tokens, OutputReceiver<T> receiver) {
 
     Mapper<T> mapper = read.mapperFactoryFn().apply(this.session);
-    String query = Read.generateRangeQuery(this.read, partitionKey);
+    String query = CassandraIO.generateRangeQuery(this.read, partitionKey);
     LOG.error("Error with range query, range query is " +  query);
     PreparedStatement preparedStatement = session.prepare(query);
 

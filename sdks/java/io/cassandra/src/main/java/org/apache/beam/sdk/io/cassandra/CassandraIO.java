@@ -21,12 +21,10 @@ import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Prec
 import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkState;
 
 import com.datastax.driver.core.Cluster;
-import com.datastax.driver.core.ColumnMetadata;
 import com.datastax.driver.core.ConsistencyLevel;
 import com.datastax.driver.core.PlainTextAuthProvider;
 import com.datastax.driver.core.QueryOptions;
 import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.ResultSetFuture;
 import com.datastax.driver.core.Row;
 import com.datastax.driver.core.Session;
 import com.datastax.driver.core.policies.DCAwareRoundRobinPolicy;
@@ -34,10 +32,7 @@ import com.datastax.driver.core.policies.TokenAwarePolicy;
 import com.google.auto.value.AutoValue;
 import java.math.BigInteger;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Iterator;
 import java.util.List;
-import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -46,9 +41,6 @@ import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.Coder;
-import org.apache.beam.sdk.coders.IterableCoder;
-import org.apache.beam.sdk.coders.SerializableCoder;
-import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.Create;
@@ -58,7 +50,7 @@ import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.SerializableFunction;
-import org.apache.beam.sdk.transforms.display.DisplayData;
+import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
@@ -66,7 +58,6 @@ import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Iterators;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -132,6 +123,66 @@ public class CassandraIO {
   /** Provide a {@link Write} {@link PTransform} to delete data to a Cassandra database. */
   public static <T> Write<T> delete() {
     return Write.<T>builder(MutationType.DELETE).build();
+  }
+
+  /**
+   * Check if the current partitioner is the Murmur3 (default in Cassandra version newer than 2).
+   */
+  @VisibleForTesting
+  static boolean isMurmur3Partitioner(Cluster cluster) {
+    return MURMUR3PARTITIONER.equals(cluster.getMetadata().getPartitioner());
+  }
+
+  static String generateRangeQuery(
+      CassandraInfo spec, String partitionKey) {
+    final String rangeFilter =
+        Joiner.on(" AND ")
+            .skipNulls()
+            .join(
+                String.format("(token(%s) >= ?)", partitionKey),
+                String.format("(token(%s) < ?)", partitionKey));
+    final String query =
+        (spec.query() == null)
+            ? buildQuery(spec) + " WHERE " + rangeFilter
+            : buildQuery(spec) + " AND " + rangeFilter;
+    LOG.debug("CassandraIO generated query : {}", query);
+    return query;
+  }
+
+  private static String buildQuery(CassandraInfo spec) {
+    return (spec.query() == null)
+        ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
+        : spec.query().get().toString();
+  }
+
+  /** Get a Cassandra cluster using hosts and port. */
+  static Cluster getCluster(
+      ValueProvider<List<String>> hosts,
+      ValueProvider<Integer> port,
+      ValueProvider<String> username,
+      ValueProvider<String> password,
+      ValueProvider<String> localDc,
+      ValueProvider<String> consistencyLevel) {
+    Cluster.Builder builder =
+        Cluster.builder().addContactPoints(hosts.get().toArray(new String[0])).withPort(port.get());
+
+    if (username != null) {
+      builder.withAuthProvider(new PlainTextAuthProvider(username.get(), password.get()));
+    }
+
+    DCAwareRoundRobinPolicy.Builder dcAwarePolicyBuilder = new DCAwareRoundRobinPolicy.Builder();
+    if (localDc != null) {
+      dcAwarePolicyBuilder.withLocalDc(localDc.get());
+    }
+
+    builder.withLoadBalancingPolicy(new TokenAwarePolicy(dcAwarePolicyBuilder.build()));
+
+    if (consistencyLevel != null) {
+      builder.withQueryOptions(
+          new QueryOptions().setConsistencyLevel(ConsistencyLevel.valueOf(consistencyLevel.get())));
+    }
+
+    return builder.build();
   }
 
   /**
@@ -354,8 +405,7 @@ public class CassandraIO {
               cluster.getMetadata().getPartitioner());
           return input
               .apply("Creating splits", Create.of(splitGenerator.generateSplits(10, tokens)))
-              //.setCoder(IterableCoder.of(SerializableCoder.of(RingRange.class)))
-              .apply("parallel querying", ParDo.of(new ParallelQueryFn<>(this)))
+              .apply("parallel querying", ParDo.of(new ParallelQueryFn<T>(getCassandraInfo())))
               .setCoder(coder());
 
 
@@ -368,6 +418,10 @@ public class CassandraIO {
           //    new CassandraIO.CassandraSource<>(spec, Collections.singletonList(buildQuery(spec))));
         }
       }
+    }
+
+    CassandraInfo<T> getCassandraInfo() {
+      return CassandraInfo.Create(hosts(), query(), port(), keyspace(), table(), username(), password(), localDc(), consistencyLevel(), mapperFactoryFn(), entity());
     }
 
     @AutoValue.Builder
@@ -412,166 +466,11 @@ public class CassandraIO {
       }
     }
 
-  //@VisibleForTesting
-  //static class CassandraSource<T> extends BoundedSource<T> {
-  //  final Read<T> spec;
-  //  final List<String> splitQueries;
 
 
 
-  private static String buildQuery(Read spec) {
-    return (spec.query() == null)
-        ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
-        : spec.query().get().toString();
-  }
 
-
-    //Compute the number of splits based on the estimated size and the desired bundle size, and
-    //create several sources.
-  /*
-  private List<BoundedSource<T>> splitWithTokenRanges(
-      CassandraIO.Read<T> spec,
-      long desiredBundleSizeBytes,
-      long estimatedSizeBytes,
-      Cluster cluster) {
-    long numSplits =
-        getNumSplits(desiredBundleSizeBytes, estimatedSizeBytes, spec.minNumberOfSplits());
-    LOG.info("Number of desired splits is {}", numSplits);
-
-    SplitGenerator splitGenerator = new SplitGenerator(cluster.getMetadata().getPartitioner());
-    List<BigInteger> tokens =
-        cluster.getMetadata().getTokenRanges().stream()
-            .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
-            .collect(Collectors.toList());
-    List<List<RingRange>> splits = splitGenerator.generateSplits(numSplits, tokens);
-    LOG.info("{} splits were actually generated", splits.size());
-
-    final String partitionKey =
-        cluster.getMetadata().getKeyspace(spec.keyspace().get()).getTable(spec.table().get())
-            .getPartitionKey().stream()
-            .map(ColumnMetadata::getName)
-            .collect(Collectors.joining(","));
-
-    List<BoundedSource<T>> sources = new ArrayList<>();
-    for (List<RingRange> split : splits) {
-      List<String> queries = new ArrayList<>();
-      for (RingRange range : split) {
-        if (range.isWrapping()) {
-          // A wrapping range is one that overlaps from the end of the partitioner range and its
-          // start (ie : when the start token of the split is greater than the end token)
-          // We need to generate two queries here : one that goes from the start token to the end
-          // of
-          // the partitioner range, and the other from the start of the partitioner range to the
-          // end token of the split.
-          queries.add(generateRangeQuery(spec, partitionKey, range.getStart(), null));
-          // Generation of the second query of the wrapping range
-          queries.add(generateRangeQuery(spec, partitionKey, null, range.getEnd()));
-        } else {
-          queries.add(generateRangeQuery(spec, partitionKey, range.getStart(), range.getEnd()));
-        }
-      }
-      sources.add(new CassandraIO.CassandraSource<>(spec, queries));
-    }
-    return sources;
-  }*/
-
-  static String generateRangeQuery(
-      CassandraIO.Read spec, String partitionKey) {
-    final String rangeFilter =
-        Joiner.on(" AND ")
-            .skipNulls()
-            .join(
-                String.format("(token(%s) >= ?)", partitionKey),
-                String.format("(token(%s) < ?)", partitionKey));
-    final String query =
-        (spec.query() == null)
-            ? buildQuery(spec) + " WHERE " + rangeFilter
-            : buildQuery(spec) + " AND " + rangeFilter;
-    LOG.debug("CassandraIO generated query : {}", query);
-    return query;
-  }
-
-  static String generateRangeQuery(
-      Read spec, String partitionKey, BigInteger rangeStart, BigInteger rangeEnd) {
-    final String rangeFilter =
-        Joiner.on(" AND ")
-            .skipNulls()
-            .join(
-                rangeStart == null
-                    ? null
-                    : String.format("(token(%s) >= %d)", partitionKey, rangeStart),
-                rangeEnd == null
-                    ? null
-                    : String.format("(token(%s) < %d)", partitionKey, rangeEnd));
-    final String query =
-        (spec.query() == null)
-            ? buildQuery(spec) + " WHERE " + rangeFilter
-            : buildQuery(spec) + " AND " + rangeFilter;
-    LOG.debug("CassandraIO generated query : {}", query);
-    return query;
-  }
-
-  private static long getNumSplits(
-      long desiredBundleSizeBytes,
-      long estimatedSizeBytes,
-      @Nullable ValueProvider<Integer> minNumberOfSplits) {
-    long numSplits =
-        desiredBundleSizeBytes > 0 ? (estimatedSizeBytes / desiredBundleSizeBytes) : 1;
-    if (numSplits <= 0) {
-      LOG.warn("Number of splits is less than 0 ({}), fallback to 1", numSplits);
-      numSplits = 1;
-    }
-    return minNumberOfSplits != null ? Math.max(numSplits, minNumberOfSplits.get()) : numSplits;
-  }
-
-
-
-  @VisibleForTesting
-  static long getEstimatedSizeBytesFromTokenRanges(List<TokenRange> tokenRanges) {
-    long size = 0L;
-    for (TokenRange tokenRange : tokenRanges) {
-      size = size + tokenRange.meanPartitionSize * tokenRange.partitionCount;
-    }
-    return Math.round(size / getRingFraction(tokenRanges));
-  }
   // ------------- CASSANDRA SOURCE UTIL METHODS ---------------//
-
-  /**
-   * Gets the list of token ranges that a table occupies on a give Cassandra node.
-   *
-   * <p>NB: This method is compatible with Cassandra 2.1.5 and greater.
-   */
-  private static List<TokenRange> getTokenRanges(Cluster cluster, String keyspace, String table) {
-    try (Session session = cluster.newSession()) {
-      ResultSet resultSet =
-          session.execute(
-              "SELECT range_start, range_end, partitions_count, mean_partition_size FROM "
-                  + "system.size_estimates WHERE keyspace_name = ? AND table_name = ?",
-              keyspace,
-              table);
-
-      ArrayList<TokenRange> tokenRanges = new ArrayList<>();
-      for (Row row : resultSet) {
-        TokenRange tokenRange =
-            new TokenRange(
-                row.getLong("partitions_count"),
-                row.getLong("mean_partition_size"),
-                new BigInteger(row.getString("range_start")),
-                new BigInteger(row.getString("range_end")));
-        tokenRanges.add(tokenRange);
-      }
-      // The table may not contain the estimates yet
-      // or have partitions_count and mean_partition_size fields = 0
-      // if the data was just inserted and the amount of data in the table was small.
-      // This is very common situation during tests,
-      // when we insert a few rows and immediately query them.
-      // However, for tiny data sets the lack of size estimates is not a problem at all,
-      // because we don't want to split tiny data anyways.
-      // Therefore, we're not issuing a warning if the result set was empty
-      // or mean_partition_size and partitions_count = 0.
-      return tokenRanges;
-    }
-  }
 
   /** Compute the percentage of token addressed compared with the whole tokens in the cluster. */
   @VisibleForTesting
@@ -586,13 +485,7 @@ public class CassandraIO {
     return ringFraction;
   }
 
-  /**
-   * Check if the current partitioner is the Murmur3 (default in Cassandra version newer than 2).
-   */
-  @VisibleForTesting
-  static boolean isMurmur3Partitioner(Cluster cluster) {
-    return MURMUR3PARTITIONER.equals(cluster.getMetadata().getPartitioner());
-  }
+
 
   /** Measure distance between two tokens. */
   @VisibleForTesting
@@ -602,6 +495,8 @@ public class CassandraIO {
         : right.subtract(left).add(SplitGenerator.getRangeSize(MURMUR3PARTITIONER));
   }
 
+
+  }
     /**
      * Represent a token range in Cassandra instance, wrapping the partition count, size and token
      * range.
@@ -621,8 +516,6 @@ public class CassandraIO {
         this.rangeEnd = rangeEnd;
       }
     }
-  }
-
   /** Specify the mutation type: either write or delete. */
   public enum MutationType {
     WRITE,
@@ -939,35 +832,7 @@ public class CassandraIO {
     }
   }
 
-  /** Get a Cassandra cluster using hosts and port. */
-  static Cluster getCluster(
-      ValueProvider<List<String>> hosts,
-      ValueProvider<Integer> port,
-      ValueProvider<String> username,
-      ValueProvider<String> password,
-      ValueProvider<String> localDc,
-      ValueProvider<String> consistencyLevel) {
-    Cluster.Builder builder =
-        Cluster.builder().addContactPoints(hosts.get().toArray(new String[0])).withPort(port.get());
 
-    if (username != null) {
-      builder.withAuthProvider(new PlainTextAuthProvider(username.get(), password.get()));
-    }
-
-    DCAwareRoundRobinPolicy.Builder dcAwarePolicyBuilder = new DCAwareRoundRobinPolicy.Builder();
-    if (localDc != null) {
-      dcAwarePolicyBuilder.withLocalDc(localDc.get());
-    }
-
-    builder.withLoadBalancingPolicy(new TokenAwarePolicy(dcAwarePolicyBuilder.build()));
-
-    if (consistencyLevel != null) {
-      builder.withQueryOptions(
-          new QueryOptions().setConsistencyLevel(ConsistencyLevel.valueOf(consistencyLevel.get())));
-    }
-
-    return builder.build();
-  }
 
   /** Mutator allowing to do side effects into Apache Cassandra database. */
   private static class Mutator<T> {
@@ -1040,6 +905,278 @@ public class CassandraIO {
     private void waitForFuturesToFinish() throws ExecutionException, InterruptedException {
       for (Future<Void> future : mutateFutures) {
         future.get();
+      }
+    }
+  }
+
+/**
+   * A {@link PTransform} to read data from Apache Cassandra. See {@link CassandraIO} for more
+   * information on usage and configuration.
+   */
+  @AutoValue
+  public abstract static class ReadAll<T> extends PTransform<PCollection<RingRange>, PCollection<T>> {
+    @Nullable
+    abstract ValueProvider<List<String>> hosts();
+
+    @Nullable
+    abstract ValueProvider<String> query();
+
+    @Nullable
+    abstract ValueProvider<Integer> port();
+
+    @Nullable
+    abstract ValueProvider<String> keyspace();
+
+    @Nullable
+    abstract ValueProvider<String> table();
+
+    @Nullable
+    abstract Class<T> entity();
+
+    @Nullable
+    abstract Coder<T> coder();
+
+    @Nullable
+    abstract ValueProvider<String> username();
+
+    @Nullable
+    abstract ValueProvider<String> password();
+
+    @Nullable
+    abstract ValueProvider<String> localDc();
+
+    @Nullable
+    abstract ValueProvider<String> consistencyLevel();
+
+    @Nullable
+    abstract ValueProvider<Integer> splitCount();
+
+    @Nullable
+    abstract SerializableFunction<Session, Mapper> mapperFactoryFn();
+
+    @Nullable
+    abstract SerializableFunction<RingRange, Integer> groupingFn();
+
+    abstract Builder<T> builder();
+
+    /** Specify the hosts of the Apache Cassandra instances. */
+    public ReadAll<T> withHosts(List<String> hosts) {
+      checkArgument(hosts != null, "hosts can not be null");
+      checkArgument(!hosts.isEmpty(), "hosts can not be empty");
+      return withHosts(ValueProvider.StaticValueProvider.of(hosts));
+    }
+
+    /** Specify the hosts of the Apache Cassandra instances. */
+    public ReadAll<T> withHosts(ValueProvider<List<String>> hosts) {
+      return builder().setHosts(hosts).build();
+    }
+
+    /** Specify the port number of the Apache Cassandra instances. */
+    public ReadAll<T> withPort(int port) {
+      checkArgument(port > 0, "port must be > 0, but was: %s", port);
+      return withPort(ValueProvider.StaticValueProvider.of(port));
+    }
+
+    /** Specify the port number of the Apache Cassandra instances. */
+    public ReadAll<T> withPort(ValueProvider<Integer> port) {
+      return builder().setPort(port).build();
+    }
+
+    /** Specify the Cassandra keyspace where to read data. */
+    public ReadAll<T> withKeyspace(String keyspace) {
+      checkArgument(keyspace != null, "keyspace can not be null");
+      return withKeyspace(ValueProvider.StaticValueProvider.of(keyspace));
+    }
+
+    /** Specify the Cassandra keyspace where to read data. */
+    public ReadAll<T> withKeyspace(ValueProvider<String> keyspace) {
+      return builder().setKeyspace(keyspace).build();
+    }
+
+    /** Specify the Cassandra table where to read data. */
+    public ReadAll<T> withTable(String table) {
+      checkArgument(table != null, "table can not be null");
+      return withTable(ValueProvider.StaticValueProvider.of(table));
+    }
+
+    /** Specify the Cassandra table where to read data. */
+    public ReadAll<T> withTable(ValueProvider<String> table) {
+      return builder().setTable(table).build();
+    }
+
+    /** Specify the query to read data. */
+    public ReadAll<T> withQuery(String query) {
+      checkArgument(query != null && query.length() > 0, "query cannot be null");
+      return withQuery(ValueProvider.StaticValueProvider.of(query));
+    }
+
+    /** Specify the query to read data. */
+    public ReadAll<T> withQuery(ValueProvider<String> query) {
+      return builder().setQuery(query).build();
+    }
+
+    /**
+     * Specify the entity class (annotated POJO). The {@link CassandraIO} will read the data and
+     * convert the data as entity instances. The {@link PCollection} resulting from the read will
+     * contains entity elements.
+     */
+    public ReadAll<T> withEntity(Class<T> entity) {
+      checkArgument(entity != null, "entity can not be null");
+      return builder().setEntity(entity).build();
+    }
+
+    /** Specify the {@link Coder} used to serialize the entity in the {@link PCollection}. */
+    public ReadAll<T> withCoder(Coder<T> coder) {
+      checkArgument(coder != null, "coder can not be null");
+      return builder().setCoder(coder).build();
+    }
+
+    /** Specify the username for authentication. */
+    public ReadAll<T> withUsername(String username) {
+      checkArgument(username != null, "username can not be null");
+      return withUsername(ValueProvider.StaticValueProvider.of(username));
+    }
+
+    /** Specify the username for authentication. */
+    public ReadAll<T> withUsername(ValueProvider<String> username) {
+      return builder().setUsername(username).build();
+    }
+
+    /** Specify the password used for authentication. */
+    public ReadAll<T> withPassword(String password) {
+      checkArgument(password != null, "password can not be null");
+      return withPassword(ValueProvider.StaticValueProvider.of(password));
+    }
+
+    /** Specify the password used for authentication. */
+    public ReadAll<T> withPassword(ValueProvider<String> password) {
+      return builder().setPassword(password).build();
+    }
+
+    /** Specify the local DC used for the load balancing. */
+    public ReadAll<T> withLocalDc(String localDc) {
+      checkArgument(localDc != null, "localDc can not be null");
+      return withLocalDc(ValueProvider.StaticValueProvider.of(localDc));
+    }
+
+    /** Specify the local DC used for the load balancing. */
+    public ReadAll<T> withLocalDc(ValueProvider<String> localDc) {
+      return builder().setLocalDc(localDc).build();
+    }
+
+    public ReadAll<T> withConsistencyLevel(String consistencyLevel) {
+      checkArgument(consistencyLevel != null, "consistencyLevel can not be null");
+      return withConsistencyLevel(ValueProvider.StaticValueProvider.of(consistencyLevel));
+    }
+
+    public ReadAll<T> withConsistencyLevel(ValueProvider<String> consistencyLevel) {
+      return builder().setConsistencyLevel(consistencyLevel).build();
+    }
+
+    public ReadAll<T> withGroupingFn(SerializableFunction<RingRange, Integer> groupingFunction) {
+      return builder().setGroupingFn(groupingFunction).build();
+    }
+
+    public ReadAll<T> withSlitCount(ValueProvider<Integer> splitCount) {
+      return builder().setSplitCount(splitCount).build();
+    }
+
+    /**
+     * A factory to create a specific {@link Mapper} for a given Cassandra Session. This is useful
+     * to provide mappers that don't rely in Cassandra annotated objects.
+     */
+    public ReadAll<T> withMapperFactoryFn(SerializableFunction<Session, Mapper> mapperFactory) {
+      checkArgument(
+          mapperFactory != null,
+          "CassandraIO.withMapperFactory" + "(withMapperFactory) called with null value");
+      return builder().setMapperFactoryFn(mapperFactory).build();
+    }
+
+    @Override
+    public PCollection<T> expand(PCollection<RingRange> input) {
+      checkArgument((hosts() != null && port() != null), "WithHosts() and withPort() are required");
+      checkArgument(keyspace() != null, "withKeyspace() is required");
+      checkArgument(table() != null, "withTable() is required");
+      checkArgument(entity() != null, "withEntity() is required");
+      checkArgument(coder() != null, "withCoder() is required");
+      checkArgument(groupingFn() != null, "GroupingFn OR splitCount must be set");
+
+      try (Cluster cluster =
+          getCluster(
+              hosts(),
+              port(),
+              username(),
+              password(),
+              localDc(),
+              consistencyLevel())) {
+        if (isMurmur3Partitioner(cluster)) {
+          return input.apply("mapping for the grouping function",
+              MapElements.into(TypeDescriptors.kvs(TypeDescriptors.integers(), TypeDescriptor.of(RingRange.class))).via(rr -> KV
+                  .of(groupingFn().apply(rr), rr))
+          ).apply("Grouping by grouping function", GroupByKey.create())
+              .apply("mapping to key", MapElements.into(TypeDescriptors.iterables(TypeDescriptor.of(RingRange.class))).via(kv -> kv.getValue()))
+              .apply("ParDo", ParDo.of(new ParallelQueryFn<>(getCassandraInfo())));
+
+        } else {
+          return null;
+        }
+      }
+    }
+
+    CassandraInfo<T> getCassandraInfo() {
+      return CassandraInfo.Create(hosts(), query(), port(), keyspace(), table(), username(), password(), localDc(), consistencyLevel(), mapperFactoryFn(), entity());
+    }
+
+    @AutoValue.Builder
+    abstract static class Builder<T> {
+      abstract Builder<T> setHosts(ValueProvider<List<String>> hosts);
+
+      abstract Builder<T> setQuery(ValueProvider<String> query);
+
+      abstract Builder<T> setPort(ValueProvider<Integer> port);
+
+      abstract Builder<T> setKeyspace(ValueProvider<String> keyspace);
+
+      abstract Builder<T> setTable(ValueProvider<String> table);
+
+      abstract Builder<T> setEntity(Class<T> entity);
+
+      abstract Optional<Class<T>> entity();
+
+      abstract Builder<T> setCoder(Coder<T> coder);
+
+      abstract Builder<T> setUsername(ValueProvider<String> username);
+
+      abstract Builder<T> setPassword(ValueProvider<String> password);
+
+      abstract Builder<T> setLocalDc(ValueProvider<String> localDc);
+
+      abstract Builder<T> setConsistencyLevel(ValueProvider<String> consistencyLevel);
+
+      abstract Builder<T> setSplitCount(ValueProvider<Integer> splitCount);
+
+      abstract ValueProvider<Integer> splitCount();
+
+      abstract Builder<T> setMapperFactoryFn(SerializableFunction<Session, Mapper> mapperFactoryFn);
+
+      abstract Optional<SerializableFunction<Session, Mapper>> mapperFactoryFn();
+
+      abstract Builder<T> setGroupingFn(SerializableFunction<RingRange, Integer> groupingFn);
+
+      abstract Optional<SerializableFunction<RingRange, Integer>> groupingFn();
+
+      abstract ReadAll<T> autoBuild();
+
+      public ReadAll<T> build() {
+        if (!mapperFactoryFn().isPresent() && entity().isPresent()) {
+          setMapperFactoryFn(new DefaultObjectMapperFactory(entity().get()));
+        }
+
+        if (!groupingFn().isPresent() && splitCount().get() != null) {
+          setGroupingFn(rr -> rr.getStart().intValue() % splitCount().get());
+        }
+
+        return autoBuild();
       }
     }
   }
