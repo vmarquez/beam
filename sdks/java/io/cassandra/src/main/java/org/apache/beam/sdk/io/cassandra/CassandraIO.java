@@ -24,8 +24,6 @@ import com.datastax.driver.core.Cluster;
 import com.datastax.driver.core.ConsistencyLevel;
 import com.datastax.driver.core.PlainTextAuthProvider;
 import com.datastax.driver.core.QueryOptions;
-import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.Row;
 import com.datastax.driver.core.Session;
 import com.datastax.driver.core.policies.DCAwareRoundRobinPolicy;
 import com.datastax.driver.core.policies.TokenAwarePolicy;
@@ -115,6 +113,11 @@ public class CassandraIO {
     return new AutoValue_CassandraIO_Read.Builder<T>().build();
   }
 
+  /** Provide a {@link ReadAll} {@link PTransform} to read data from a Cassandra database. */
+  public static <T> ReadAll<T> readAll() {
+    return new AutoValue_CassandraIO_ReadAll.Builder<T>().build();
+  }
+
   /** Provide a {@link Write} {@link PTransform} to write data to a Cassandra database. */
   public static <T> Write<T> write() {
     return Write.<T>builder(MutationType.WRITE).build();
@@ -134,7 +137,7 @@ public class CassandraIO {
   }
 
   static String generateRangeQuery(
-      CassandraInfo spec, String partitionKey) {
+      CassandraConfig spec, String partitionKey) {
     final String rangeFilter =
         Joiner.on(" AND ")
             .skipNulls()
@@ -149,7 +152,7 @@ public class CassandraIO {
     return query;
   }
 
-  private static String buildQuery(CassandraInfo spec) {
+  private static String buildQuery(CassandraConfig spec) {
     return (spec.query() == null)
         ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
         : spec.query().get().toString();
@@ -420,8 +423,8 @@ public class CassandraIO {
       }
     }
 
-    CassandraInfo<T> getCassandraInfo() {
-      return CassandraInfo.Create(hosts(), query(), port(), keyspace(), table(), username(), password(), localDc(), consistencyLevel(), mapperFactoryFn(), entity());
+    CassandraConfig<T> getCassandraInfo() {
+      return CassandraConfig.Create(hosts(), query(), port(), keyspace(), table(), username(), password(), localDc(), consistencyLevel(), mapperFactoryFn(), entity());
     }
 
     @AutoValue.Builder
@@ -465,10 +468,6 @@ public class CassandraIO {
         return autoBuild();
       }
     }
-
-
-
-
 
   // ------------- CASSANDRA SOURCE UTIL METHODS ---------------//
 
@@ -1077,9 +1076,14 @@ public class CassandraIO {
       return builder().setGroupingFn(groupingFunction).build();
     }
 
-    public ReadAll<T> withSlitCount(ValueProvider<Integer> splitCount) {
+    public ReadAll<T> withSplitCount(ValueProvider<Integer> splitCount) {
       return builder().setSplitCount(splitCount).build();
     }
+
+  public ReadAll<T> withSlitCount(Integer splitCount) {
+      checkArgument(splitCount != null, "splitCount can not be null");
+      return withSplitCount(ValueProvider.StaticValueProvider.<Integer>of(splitCount));
+  }
 
     /**
      * A factory to create a specific {@link Mapper} for a given Cassandra Session. This is useful
@@ -1115,7 +1119,8 @@ public class CassandraIO {
                   .of(groupingFn().apply(rr), rr))
           ).apply("Grouping by grouping function", GroupByKey.create())
               .apply("mapping to key", MapElements.into(TypeDescriptors.iterables(TypeDescriptor.of(RingRange.class))).via(kv -> kv.getValue()))
-              .apply("ParDo", ParDo.of(new ParallelQueryFn<>(getCassandraInfo())));
+              .apply("ParDo", ParDo.of(new ParallelQueryFn<>(getCassandraInfo())))
+              .setCoder(coder());
 
         } else {
           return null;
@@ -1123,8 +1128,8 @@ public class CassandraIO {
       }
     }
 
-    CassandraInfo<T> getCassandraInfo() {
-      return CassandraInfo.Create(hosts(), query(), port(), keyspace(), table(), username(), password(), localDc(), consistencyLevel(), mapperFactoryFn(), entity());
+    CassandraConfig<T> getCassandraInfo() {
+      return CassandraConfig.Create(hosts(), query(), port(), keyspace(), table(), username(), password(), localDc(), consistencyLevel(), mapperFactoryFn(), entity());
     }
 
     @AutoValue.Builder
@@ -1171,12 +1176,19 @@ public class CassandraIO {
         if (!mapperFactoryFn().isPresent() && entity().isPresent()) {
           setMapperFactoryFn(new DefaultObjectMapperFactory(entity().get()));
         }
+        System.out.println(this.groupingFn());
+        System.out.println(this.splitCount());
 
-        if (!groupingFn().isPresent() && splitCount().get() != null) {
-          setGroupingFn(rr -> rr.getStart().intValue() % splitCount().get());
-        }
+        checkGroupingFn(this);
 
         return autoBuild();
+      }
+
+      private static <T> void checkGroupingFn(Builder<T> builder) {
+        if (!builder.groupingFn().isPresent() && builder.splitCount() != null) {
+          int splitCount = builder.splitCount().get();
+          builder.setGroupingFn(rr -> rr.getStart().intValue() % splitCount);
+        }
       }
     }
   }

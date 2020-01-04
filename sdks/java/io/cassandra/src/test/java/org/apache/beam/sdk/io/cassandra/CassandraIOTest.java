@@ -28,9 +28,12 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 
 import com.datastax.driver.core.Cluster;
+import com.datastax.driver.core.ProtocolVersion;
 import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Row;
 import com.datastax.driver.core.Session;
+import com.datastax.driver.core.Token;
+import com.datastax.driver.core.TypeCodec;
 import com.datastax.driver.core.exceptions.NoHostAvailableException;
 import com.datastax.driver.core.querybuilder.QueryBuilder;
 import com.datastax.driver.mapping.annotations.ClusteringColumn;
@@ -44,10 +47,12 @@ import java.io.File;
 import java.io.IOException;
 import java.io.Serializable;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -295,6 +300,57 @@ public class CassandraIOTest implements Serializable {
                 assertEquals(element.getKey(), NUM_ROWS / 10, element.getValue().longValue());
               }
               return null;
+            });
+
+    pipeline.run();
+  }
+
+  private RingRange tokenBytesToRingRange(ByteBuffer bb) {
+    BigInteger bi = BigInteger.valueOf((long)cluster.getMetadata().newToken(bb).getValue());
+    return new RingRange(bi, bi.add(BigInteger.valueOf(1L)));
+  }
+
+  @Test
+  public void testReadAll() throws Exception {
+
+    RingRange bioRR = tokenBytesToRingRange(TypeCodec.varchar().serialize("bio", ProtocolVersion.V3));
+    RingRange mathRR = tokenBytesToRingRange(TypeCodec.varchar().serialize("math", ProtocolVersion.V3));
+
+    PCollection<Scientist> output =
+        pipeline.apply(Create.of(bioRR, mathRR))
+            .apply(
+            CassandraIO.<Scientist>readAll()
+                .withSlitCount(2)
+                .withHosts(Collections.singletonList(CASSANDRA_HOST))
+                .withPort(cassandraPort)
+                .withKeyspace(CASSANDRA_KEYSPACE)
+                .withTable(CASSANDRA_TABLE)
+                .withCoder(SerializableCoder.of(Scientist.class))
+                .withEntity(Scientist.class));
+
+
+    //PAssert.thatSingleton(output.apply("Count", Count.globally())).isEqualTo(NUM_ROWS);
+
+    PCollection<KV<String, Integer>> mapped =
+        output.apply(
+            MapElements.via(
+                new SimpleFunction<Scientist, KV<String, Integer>>() {
+                  @Override
+                  public KV<String, Integer> apply(Scientist scientist) {
+                    return KV.of(scientist.department, scientist.id);
+                  }
+                }));
+    PAssert.that(mapped.apply("Count occurrences per scientist", Count.perKey()))
+        .satisfies(
+            input -> {
+              HashMap<String, Long> map = new HashMap<>();
+              for (KV<String, Long> element : input) {
+                map.put(element.getKey(), element.getValue());
+             }
+             assertTrue(map.size() == 2);
+             //assertEquals((long)map.get("bio"), 3L);
+             //assertEquals((long)map.get("math"), 2L);
+             return null;
             });
 
     pipeline.run();

@@ -16,7 +16,7 @@ public class ParallelQueryFn<T> extends DoFn<Iterable<RingRange>, T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(CassandraIO.class);
 
-  private final CassandraInfo<T> read;
+  private final CassandraConfig<T> read;
 
   private transient Cluster cluster;
 
@@ -24,7 +24,7 @@ public class ParallelQueryFn<T> extends DoFn<Iterable<RingRange>, T> {
 
   private String partitionKey;
 
-  public ParallelQueryFn(CassandraInfo<T> read) {
+  public ParallelQueryFn(CassandraConfig<T> read) {
     this.read = read;
   }
 
@@ -61,7 +61,6 @@ public class ParallelQueryFn<T> extends DoFn<Iterable<RingRange>, T> {
     for (RingRange rr : tokens) {
       Token startToken = cluster.getMetadata().newToken(rr.getStart().toString());
       Token endToken = cluster.getMetadata().newToken(rr.getEnd().toString());
-      LOG.info("Start and end token = " + startToken + " AND " + endToken);
       ResultSet rs = session.execute(preparedStatement.bind().setToken(0, startToken).setToken(1, endToken));
       Iterator<T> iter = mapper.map(rs);
       while(iter.hasNext()) {
