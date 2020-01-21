@@ -57,7 +57,6 @@ import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -380,7 +379,7 @@ public class CassandraIO {
           return input
               .apply(
                   "Creating splits", Create.of(splitGenerator.generateSplits(splitCount, tokens)))
-              .apply("parallel querying", ParDo.of(new QueryFn<T>(getCassandraConfig())))
+              .apply("parallel querying", ParDo.of(new ReadFn<T>(getCassandraConfig())))
               .setCoder(coder());
 
         } else {
@@ -393,7 +392,7 @@ public class CassandraIO {
                   SplitGenerator.getRangeMin(partitioner), SplitGenerator.getRangeMax(partitioner));
           return input
               .apply(Create.of(Collections.singleton(Collections.singleton(totalRingRange))))
-              .apply(ParDo.of(new QueryFn<T>(getCassandraConfig())))
+              .apply(ParDo.of(new ReadFn<T>(getCassandraConfig())))
               .setCoder(coder());
         }
       }
@@ -458,45 +457,12 @@ public class CassandraIO {
 
     // ------------- CASSANDRA SOURCE UTIL METHODS ---------------//
 
-    /** Compute the percentage of token addressed compared with the whole tokens in the cluster. */
-    @VisibleForTesting
-    static double getRingFraction(List<TokenRange> tokenRanges) {
-      double ringFraction = 0;
-      for (TokenRange tokenRange : tokenRanges) {
-        ringFraction =
-            ringFraction
-                + (distance(tokenRange.rangeStart, tokenRange.rangeEnd).doubleValue()
-                    / SplitGenerator.getRangeSize(MURMUR3PARTITIONER).doubleValue());
-      }
-      return ringFraction;
-    }
-
     /** Measure distance between two tokens. */
     @VisibleForTesting
     static BigInteger distance(BigInteger left, BigInteger right) {
       return (right.compareTo(left) > 0)
           ? right.subtract(left)
           : right.subtract(left).add(SplitGenerator.getRangeSize(MURMUR3PARTITIONER));
-    }
-  }
-
-  /**
-   * Represent a token range in Cassandra instance, wrapping the partition count, size and token
-   * range.
-   */
-  @VisibleForTesting
-  static class TokenRange {
-    private final long partitionCount;
-    private final long meanPartitionSize;
-    private final BigInteger rangeStart;
-    private final BigInteger rangeEnd;
-
-    TokenRange(
-        long partitionCount, long meanPartitionSize, BigInteger rangeStart, BigInteger rangeEnd) {
-      this.partitionCount = partitionCount;
-      this.meanPartitionSize = meanPartitionSize;
-      this.rangeStart = rangeStart;
-      this.rangeEnd = rangeEnd;
     }
   }
 
@@ -512,27 +478,6 @@ public class CassandraIO {
   @VisibleForTesting
   static boolean isMurmur3Partitioner(Cluster cluster) {
     return MURMUR3PARTITIONER.equals(cluster.getMetadata().getPartitioner());
-  }
-
-  static String generateRangeQuery(CassandraConfig spec, String partitionKey) {
-    final String rangeFilter =
-        Joiner.on(" AND ")
-            .skipNulls()
-            .join(
-                String.format("(token(%s) >= ?)", partitionKey),
-                String.format("(token(%s) < ?)", partitionKey));
-    final String query =
-        (spec.query() == null)
-            ? buildQuery(spec) + " WHERE " + rangeFilter
-            : buildQuery(spec) + " AND " + rangeFilter;
-    LOG.debug("CassandraIO generated query : {}", query);
-    return query;
-  }
-
-  private static String buildQuery(CassandraConfig spec) {
-    return (spec.query() == null)
-        ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
-        : spec.query().get().toString();
   }
 
   /**
@@ -1132,7 +1077,7 @@ public class CassandraIO {
                 "mapping to key",
                 MapElements.into(TypeDescriptors.iterables(TypeDescriptor.of(RingRange.class)))
                     .via(kv -> kv.getValue()))
-            .apply("ParDo", ParDo.of(new QueryFn<>(getCassandraConfig())))
+            .apply("ParDo", ParDo.of(new ReadFn<>(getCassandraConfig())))
             .setCoder(coder());
       }
     }
@@ -1196,9 +1141,6 @@ public class CassandraIO {
         if (!mapperFactoryFn().isPresent() && entity().isPresent()) {
           setMapperFactoryFn(new DefaultObjectMapperFactory(entity().get()));
         }
-        System.out.println(this.groupingFn());
-        System.out.println(this.splitCount());
-
         checkGroupingFn(this);
 
         return autoBuild();
