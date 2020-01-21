@@ -19,7 +19,6 @@ package org.apache.beam.sdk.io.cassandra;
 
 import static junit.framework.TestCase.assertTrue;
 import static org.apache.beam.sdk.io.cassandra.CassandraIO.Read.distance;
-import static org.apache.beam.sdk.io.cassandra.CassandraIO.Read.getRingFraction;
 import static org.apache.beam.sdk.io.cassandra.CassandraIO.isMurmur3Partitioner;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
@@ -61,7 +60,6 @@ import javax.management.remote.JMXConnector;
 import javax.management.remote.JMXConnectorFactory;
 import javax.management.remote.JMXServiceURL;
 import org.apache.beam.sdk.coders.SerializableCoder;
-import org.apache.beam.sdk.io.cassandra.CassandraIO.TokenRange;
 import org.apache.beam.sdk.io.common.NetworkTestHelper;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
@@ -300,7 +298,6 @@ public class CassandraIOTest implements Serializable {
 
   @Test
   public void testReadAll() {
-
     RingRange bioRR =
         tokenBytesToRingRange(TypeCodec.varchar().serialize("bio", ProtocolVersion.V3));
     RingRange mathRR =
@@ -420,7 +417,6 @@ public class CassandraIOTest implements Serializable {
 
     @Override
     public Iterator map(ResultSet resultSet) {
-
       if (!resultSet.isExhausted()) {
         resultSet.iterator().forEachRemaining(r -> counter.getAndIncrement());
       }
@@ -559,18 +555,6 @@ public class CassandraIOTest implements Serializable {
 
     dist = distance(new BigInteger("100"), new BigInteger("10"));
     assertEquals(new BigInteger("18446744073709551526"), dist);
-  }
-
-  @Test
-  public void testRingFraction() {
-    // simulate a first range taking "half" of the available tokens
-    List<TokenRange> tokenRanges = new ArrayList<>();
-    tokenRanges.add(new TokenRange(1, 1, BigInteger.valueOf(Long.MIN_VALUE), new BigInteger("0")));
-    assertEquals(0.5, getRingFraction(tokenRanges), 0);
-
-    // add a second range to cover all tokens available
-    tokenRanges.add(new TokenRange(1, 1, new BigInteger("0"), BigInteger.valueOf(Long.MAX_VALUE)));
-    assertEquals(1.0, getRingFraction(tokenRanges), 0);
   }
 
   /** Simple Cassandra entity used in read tests. */

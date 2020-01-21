@@ -26,12 +26,13 @@ import com.datastax.driver.core.Token;
 import java.util.Iterator;
 import java.util.stream.Collectors;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class QueryFn<T> extends DoFn<Iterable<RingRange>, T> {
+class ReadFn<T> extends DoFn<Iterable<RingRange>, T> {
 
-  private static final Logger LOG = LoggerFactory.getLogger(CassandraIO.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ReadFn.class);
 
   private final CassandraConfig<T> read;
 
@@ -41,7 +42,7 @@ public class QueryFn<T> extends DoFn<Iterable<RingRange>, T> {
 
   private String partitionKey;
 
-  public QueryFn(CassandraConfig<T> read) {
+  ReadFn(CassandraConfig<T> read) {
     this.read = read;
   }
 
@@ -70,9 +71,8 @@ public class QueryFn<T> extends DoFn<Iterable<RingRange>, T> {
 
   @ProcessElement
   public void processElement(@Element Iterable<RingRange> tokens, OutputReceiver<T> receiver) {
-
     Mapper<T> mapper = read.mapperFactoryFn().apply(this.session);
-    String query = CassandraIO.generateRangeQuery(this.read, partitionKey);
+    String query = generateRangeQuery(this.read, partitionKey);
     PreparedStatement preparedStatement = session.prepare(query);
 
     for (RingRange rr : tokens) {
@@ -85,5 +85,26 @@ public class QueryFn<T> extends DoFn<Iterable<RingRange>, T> {
         receiver.output(iter.next());
       }
     }
+  }
+
+  private static String generateRangeQuery(CassandraConfig spec, String partitionKey) {
+    final String rangeFilter =
+        Joiner.on(" AND ")
+            .skipNulls()
+            .join(
+                String.format("(token(%s) >= ?)", partitionKey),
+                String.format("(token(%s) < ?)", partitionKey));
+    final String query =
+        (spec.query() == null)
+            ? buildQuery(spec) + " WHERE " + rangeFilter
+            : buildQuery(spec) + " AND " + rangeFilter;
+    LOG.debug("CassandraIO generated query : {}", query);
+    return query;
+  }
+
+  private static String buildQuery(CassandraConfig spec) {
+    return (spec.query() == null)
+        ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
+        : spec.query().get().toString();
   }
 }
