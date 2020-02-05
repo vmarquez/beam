@@ -25,69 +25,68 @@ import com.datastax.driver.core.Session;
 import com.datastax.driver.core.Token;
 import java.util.Iterator;
 import java.util.stream.Collectors;
+import org.apache.beam.sdk.io.cassandra.CassandraIO.Read;
+import org.apache.beam.sdk.io.cassandra.CassandraIO.ReadAll;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Joiner;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-class ReadFn<T> extends DoFn<Iterable<RingRange>, T> {
+class ReadFn<T> extends DoFn<Read<T>, T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(ReadFn.class);
-
-  private final CassandraConfig<T> read;
 
   private transient Cluster cluster;
 
   private transient Session session;
 
-  private String partitionKey;
+  private final ReadAll<T> readAll;
 
-  ReadFn(CassandraConfig<T> read) {
-    this.read = read;
+  public ReadFn(ReadAll<T> readAll) {
+    this.readAll = readAll;
   }
 
   @Setup
   public void setup() {
     this.cluster =
         CassandraIO.getCluster(
-            read.hosts(),
-            read.port(),
-            read.username(),
-            read.password(),
-            read.localDc(),
-            read.consistencyLevel());
-    this.session = this.cluster.connect(read.keyspace().get());
-    this.partitionKey =
-        cluster.getMetadata().getKeyspace(read.keyspace().get()).getTable(read.table().get())
-            .getPartitionKey().stream()
-            .map(ColumnMetadata::getName)
-            .collect(Collectors.joining(","));
+            readAll.hosts(),
+            readAll.port(),
+            readAll.username(),
+            readAll.password(),
+            readAll.localDc(),
+            readAll.consistencyLevel());
+    this.session = cluster.connect(readAll.keyspace().get());
   }
 
+  @Teardown
   public void teardown() {
     this.session.close();
     this.cluster.close();
   }
 
   @ProcessElement
-  public void processElement(@Element Iterable<RingRange> tokens, OutputReceiver<T> receiver) {
-    Mapper<T> mapper = read.mapperFactoryFn().apply(this.session);
-    String query = generateRangeQuery(this.read, partitionKey);
+  public void processElement(@Element Read<T> read, OutputReceiver<T> receiver) {
+    Mapper<T> mapper = read.mapperFactoryFn().apply(session);
+    String partitionKey =
+        cluster.getMetadata().getKeyspace(read.keyspace().get()).getTable(read.table().get())
+            .getPartitionKey().stream()
+            .map(ColumnMetadata::getName)
+            .collect(Collectors.joining(","));
+    String query = generateRangeQuery(read, partitionKey);
     PreparedStatement preparedStatement = session.prepare(query);
-
-    for (RingRange rr : tokens) {
-      Token startToken = cluster.getMetadata().newToken(rr.getStart().toString());
-      Token endToken = cluster.getMetadata().newToken(rr.getEnd().toString());
-      ResultSet rs =
-          session.execute(preparedStatement.bind().setToken(0, startToken).setToken(1, endToken));
-      Iterator<T> iter = mapper.map(rs);
-      while (iter.hasNext()) {
-        receiver.output(iter.next());
-      }
+    RingRange rr = read.ringRange().get();
+    Token startToken = cluster.getMetadata().newToken(rr.getStart().toString());
+    Token endToken = cluster.getMetadata().newToken(rr.getEnd().toString());
+    ResultSet rs =
+        session.execute(preparedStatement.bind().setToken(0, startToken).setToken(1, endToken));
+    Iterator<T> iter = mapper.map(rs);
+    while (iter.hasNext()) {
+      receiver.output(iter.next());
     }
   }
 
-  private static String generateRangeQuery(CassandraConfig spec, String partitionKey) {
+  private static String generateRangeQuery(Read<?> spec, String partitionKey) {
     final String rangeFilter =
         Joiner.on(" AND ")
             .skipNulls()
@@ -102,9 +101,9 @@ class ReadFn<T> extends DoFn<Iterable<RingRange>, T> {
     return query;
   }
 
-  private static String buildQuery(CassandraConfig spec) {
+  private static String buildQuery(Read<?> spec) {
     return (spec.query() == null)
         ? String.format("SELECT * FROM %s.%s", spec.keyspace().get(), spec.table().get())
-        : spec.query().get().toString();
+        : spec.query().get();
   }
 }

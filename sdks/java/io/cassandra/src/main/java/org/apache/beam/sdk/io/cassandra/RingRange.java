@@ -17,8 +17,10 @@
  */
 package org.apache.beam.sdk.io.cassandra;
 
+import com.datastax.driver.core.Metadata;
 import java.io.Serializable;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
 
 /** Models a Cassandra token range. */
 final class RingRange implements Serializable {
@@ -55,5 +57,10 @@ final class RingRange implements Serializable {
   @Override
   public String toString() {
     return String.format("(%s,%s]", start.toString(), end.toString());
+  }
+
+  public static RingRange fromEncodedKey(Metadata metadata, ByteBuffer... bb) {
+    BigInteger bi = BigInteger.valueOf((long) metadata.newToken(bb).getValue());
+    return new RingRange(bi, bi.add(BigInteger.valueOf(1L)));
   }
 }
