@@ -17,11 +17,12 @@
  */
 package org.apache.beam.sdk.io.cassandra;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.junit.Test;
@@ -43,16 +44,19 @@ public final class SplitGeneratorTest {
             .collect(Collectors.toList());
 
     SplitGenerator generator = new SplitGenerator("foo.bar.RandomPartitioner");
-    List<List<RingRange>> segments = generator.generateSplits(10, tokens);
+    Set<String> segmentSet =
+        generator.generateSplits(10, tokens).stream()
+            .map(rr -> "(" + rr.getStart() + "," + rr.getEnd() + ")")
+            .collect(Collectors.toSet());
 
-    assertEquals(12, segments.size());
-    assertEquals("[(0,1], (1,14178431955039102644307275309657008811]]", segments.get(0).toString());
-    assertEquals(
-        "[(14178431955039102644307275309657008811,28356863910078205288614550619314017621]]",
-        segments.get(1).toString());
-    assertEquals(
-        "[(70892159775195513221536376548285044053,85070591730234615865843651857942052863]]",
-        segments.get(5).toString());
+    assertTrue(segmentSet.contains("(0,1)"));
+    assertTrue(segmentSet.contains("(1,14178431955039102644307275309657008811)"));
+    assertTrue(
+        segmentSet.contains(
+            "(14178431955039102644307275309657008811,28356863910078205288614550619314017621)"));
+    assertTrue(
+        segmentSet.contains(
+            "(70892159775195513221536376548285044053,85070591730234615865843651857942052863)"));
 
     tokens =
         Stream.of(
@@ -65,16 +69,22 @@ public final class SplitGeneratorTest {
             .map(BigInteger::new)
             .collect(Collectors.toList());
 
-    segments = generator.generateSplits(10, tokens);
+    segmentSet =
+        generator.generateSplits(10, tokens).stream()
+            .map(rr -> "(" + rr.getStart() + "," + rr.getEnd() + ")")
+            .collect(Collectors.toSet());
 
-    assertEquals(12, segments.size());
-    assertEquals("[(5,6], (6,14178431955039102644307275309657008815]]", segments.get(0).toString());
-    assertEquals(
-        "[(70892159775195513221536376548285044053,85070591730234615865843651857942052863]]",
-        segments.get(5).toString());
-    assertEquals(
-        "[(141784319550391026443072753096570088109,155962751505430129087380028406227096921]]",
-        segments.get(10).toString());
+    assertTrue(segmentSet.contains("(5,6)"));
+    assertTrue(segmentSet.contains(("(6,14178431955039102644307275309657008815)")));
+    assertTrue(
+        segmentSet.contains(
+            "(70892159775195513221536376548285044053,85070591730234615865843651857942052863)"));
+    assertTrue(
+        segmentSet.contains(
+            "(70892159775195513221536376548285044053,85070591730234615865843651857942052863)"));
+    assertTrue(
+        segmentSet.contains(
+            "(141784319550391026443072753096570088109,155962751505430129087380028406227096921)"));
   }
 
   @Test(expected = RuntimeException.class)
@@ -110,17 +120,25 @@ public final class SplitGeneratorTest {
         tokenStrings.stream().map(BigInteger::new).collect(Collectors.toList());
 
     SplitGenerator generator = new SplitGenerator("foo.bar.RandomPartitioner");
-    List<List<RingRange>> segments = generator.generateSplits(5, tokens);
-    assertEquals(6, segments.size());
-    assertEquals(
-        "[(85070591730234615865843651857942052863,113427455640312821154458202477256070484],"
-            + " (113427455640312821154458202477256070484,113427455640312821154458202477256070485]]",
-        segments.get(1).toString());
-    assertEquals(
-        "[(113427455640312821154458202477256070485," + "141784319550391026443072753096570088109]]",
-        segments.get(2).toString());
-    assertEquals(
-        "[(141784319550391026443072753096570088109,5], (5,6]]", segments.get(3).toString());
+
+    Set<String> segmentSet =
+        generator.generateSplits(5, tokens).stream()
+            .map(rr -> "(" + rr.getStart() + "," + rr.getEnd() + ")")
+            .collect(Collectors.toSet());
+
+    segmentSet.stream().forEach(s -> System.out.println("| " + s));
+
+    assertTrue(
+        segmentSet.contains(
+            "(85070591730234615865843651857942052863,113427455640312821154458202477256070484)"));
+    assertTrue(
+        segmentSet.contains(
+            "(113427455640312821154458202477256070484,113427455640312821154458202477256070485)"));
+    assertTrue(
+        segmentSet.contains(
+            "(113427455640312821154458202477256070485,141784319550391026443072753096570088109)"));
+    assertTrue(segmentSet.contains("(141784319550391026443072753096570088109,5)"));
+    assertTrue(segmentSet.contains("(5,6)"));
   }
 
   @Test(expected = RuntimeException.class)
