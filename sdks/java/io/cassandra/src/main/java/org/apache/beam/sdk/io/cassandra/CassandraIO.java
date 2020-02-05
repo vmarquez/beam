@@ -44,6 +44,7 @@ import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.FlatMapElements;
 import org.apache.beam.sdk.transforms.GroupByKey;
 import org.apache.beam.sdk.transforms.MapElements;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -53,6 +54,7 @@ import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
+import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
@@ -203,6 +205,9 @@ public class CassandraIO {
     @Nullable
     abstract SerializableFunction<Session, Mapper> mapperFactoryFn();
 
+    @Nullable
+    abstract ValueProvider<RingRange> ringRange();
+
     abstract Builder<T> builder();
 
     /** Specify the hosts of the Apache Cassandra instances. */
@@ -350,6 +355,15 @@ public class CassandraIO {
       return builder().setMapperFactoryFn(mapperFactory).build();
     }
 
+    public Read<T> withRingRange(RingRange ringRange) {
+     return withRingRange(ValueProvider.StaticValueProvider.of(ringRange));
+    }
+
+    public Read<T> withRingRange(ValueProvider<RingRange> ringRange) {
+      return null;
+    }
+
+
     @Override
     public PCollection<T> expand(PBegin input) {
       checkArgument((hosts() != null && port() != null), "WithHosts() and withPort() are required");
@@ -357,44 +371,44 @@ public class CassandraIO {
       checkArgument(table() != null, "withTable() is required");
       checkArgument(entity() != null, "withEntity() is required");
       checkArgument(coder() != null, "withCoder() is required");
+      return null;
+      //try (Cluster cluster =
+      //    getCluster(hosts(), port(), username(), password(), localDc(), consistencyLevel())) {
+      //  if (isMurmur3Partitioner(cluster)) {
+      //    LOG.info("Murmur3Partitioner detected, splitting");
 
-      try (Cluster cluster =
-          getCluster(hosts(), port(), username(), password(), localDc(), consistencyLevel())) {
-        if (isMurmur3Partitioner(cluster)) {
-          LOG.info("Murmur3Partitioner detected, splitting");
+      //    List<BigInteger> tokens =
+      //        cluster.getMetadata().getTokenRanges().stream()
+      //            .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
+      //            .collect(Collectors.toList());
 
-          List<BigInteger> tokens =
-              cluster.getMetadata().getTokenRanges().stream()
-                  .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
-                  .collect(Collectors.toList());
+      //    SplitGenerator splitGenerator =
+      //        new SplitGenerator(cluster.getMetadata().getPartitioner());
 
-          SplitGenerator splitGenerator =
-              new SplitGenerator(cluster.getMetadata().getPartitioner());
+      //    Integer splitCount = cluster.getMetadata().getAllHosts().size();
+      //    if (minNumberOfSplits() != null && minNumberOfSplits().get() != null) {
+      //      splitCount = minNumberOfSplits().get();
+      //    }
+      //    return input
+      //        .apply(
+      //            "Creating splits", Create.of(splitGenerator.generateSplits(splitCount, tokens)))
+      //        .apply("parallel querying", ParDo.of(new ReadFn<T>(getCassandraConfig())))
+      //        .setCoder(coder());
 
-          Integer splitCount = cluster.getMetadata().getAllHosts().size();
-          if (minNumberOfSplits() != null && minNumberOfSplits().get() != null) {
-            splitCount = minNumberOfSplits().get();
-          }
-          return input
-              .apply(
-                  "Creating splits", Create.of(splitGenerator.generateSplits(splitCount, tokens)))
-              .apply("parallel querying", ParDo.of(new ReadFn<T>(getCassandraConfig())))
-              .setCoder(coder());
-
-        } else {
-          LOG.warn(
-              "Only Murmur3Partitioner is supported for splitting, using an unique source for "
-                  + "the read");
-          String partitioner = cluster.getMetadata().getPartitioner();
-          RingRange totalRingRange =
-              new RingRange(
-                  SplitGenerator.getRangeMin(partitioner), SplitGenerator.getRangeMax(partitioner));
-          return input
-              .apply(Create.of(Collections.singleton(Collections.singleton(totalRingRange))))
-              .apply(ParDo.of(new ReadFn<T>(getCassandraConfig())))
-              .setCoder(coder());
-        }
-      }
+      //  } else {
+      //    LOG.warn(
+      //        "Only Murmur3Partitioner is supported for splitting, using an unique source for "
+      //            + "the read");
+      //    String partitioner = cluster.getMetadata().getPartitioner();
+      //    RingRange totalRingRange =
+      //        new RingRange(
+      //            SplitGenerator.getRangeMin(partitioner), SplitGenerator.getRangeMax(partitioner));
+      //    return input
+      //        .apply(Create.of(Collections.singleton(Collections.singleton(totalRingRange))))
+      //        .apply(ParDo.of(new ReadFn<T>(getCassandraConfig())))
+      //        .setCoder(coder());
+      //  }
+      //}
     }
 
     CassandraConfig<T> getCassandraConfig() {
@@ -443,6 +457,8 @@ public class CassandraIO {
       abstract Builder<T> setMapperFactoryFn(SerializableFunction<Session, Mapper> mapperFactoryFn);
 
       abstract Optional<SerializableFunction<Session, Mapper>> mapperFactoryFn();
+
+      abstract Builder<T> setRingRange(ValueProvider<RingRange> ringRange);
 
       abstract Read<T> autoBuild();
 
@@ -870,7 +886,8 @@ public class CassandraIO {
    */
   @AutoValue
   public abstract static class ReadAll<T>
-      extends PTransform<PCollection<RingRange>, PCollection<T>> {
+      extends PTransform<PCollection<Read<T>>, PCollection<T>> {
+
     @Nullable
     abstract ValueProvider<List<String>> hosts();
 
@@ -915,58 +932,78 @@ public class CassandraIO {
 
     abstract Builder<T> builder();
 
-    /** Specify the hosts of the Apache Cassandra instances. */
+    /**
+     * Specify the hosts of the Apache Cassandra instances.
+     */
     public ReadAll<T> withHosts(List<String> hosts) {
       checkArgument(hosts != null, "hosts can not be null");
       checkArgument(!hosts.isEmpty(), "hosts can not be empty");
       return withHosts(ValueProvider.StaticValueProvider.of(hosts));
     }
 
-    /** Specify the hosts of the Apache Cassandra instances. */
+    /**
+     * Specify the hosts of the Apache Cassandra instances.
+     */
     public ReadAll<T> withHosts(ValueProvider<List<String>> hosts) {
       return builder().setHosts(hosts).build();
     }
 
-    /** Specify the port number of the Apache Cassandra instances. */
+    /**
+     * Specify the port number of the Apache Cassandra instances.
+     */
     public ReadAll<T> withPort(int port) {
       checkArgument(port > 0, "port must be > 0, but was: %s", port);
       return withPort(ValueProvider.StaticValueProvider.of(port));
     }
 
-    /** Specify the port number of the Apache Cassandra instances. */
+    /**
+     * Specify the port number of the Apache Cassandra instances.
+     */
     public ReadAll<T> withPort(ValueProvider<Integer> port) {
       return builder().setPort(port).build();
     }
 
-    /** Specify the Cassandra keyspace where to read data. */
+    /**
+     * Specify the Cassandra keyspace where to read data.
+     */
     public ReadAll<T> withKeyspace(String keyspace) {
       checkArgument(keyspace != null, "keyspace can not be null");
       return withKeyspace(ValueProvider.StaticValueProvider.of(keyspace));
     }
 
-    /** Specify the Cassandra keyspace where to read data. */
+    /**
+     * Specify the Cassandra keyspace where to read data.
+     */
     public ReadAll<T> withKeyspace(ValueProvider<String> keyspace) {
       return builder().setKeyspace(keyspace).build();
     }
 
-    /** Specify the Cassandra table where to read data. */
+    /**
+     * Specify the Cassandra table where to read data.
+     */
     public ReadAll<T> withTable(String table) {
       checkArgument(table != null, "table can not be null");
       return withTable(ValueProvider.StaticValueProvider.of(table));
     }
 
-    /** Specify the Cassandra table where to read data. */
+    /**
+     * Specify the Cassandra table where to read data.
+     */
     public ReadAll<T> withTable(ValueProvider<String> table) {
       return builder().setTable(table).build();
     }
 
-    /** Specify the query to read data. */
+    /**
+     * Specify the query to read data.
+     */
     public ReadAll<T> withQuery(String query) {
       checkArgument(query != null && query.length() > 0, "query cannot be null");
       return withQuery(ValueProvider.StaticValueProvider.of(query));
     }
 
-    /** Specify the query to read data. */
+    /**
+     * Specify the query to read data.
+     */
     public ReadAll<T> withQuery(ValueProvider<String> query) {
       return builder().setQuery(query).build();
     }
@@ -981,41 +1018,55 @@ public class CassandraIO {
       return builder().setEntity(entity).build();
     }
 
-    /** Specify the {@link Coder} used to serialize the entity in the {@link PCollection}. */
+    /**
+     * Specify the {@link Coder} used to serialize the entity in the {@link PCollection}.
+     */
     public ReadAll<T> withCoder(Coder<T> coder) {
       checkArgument(coder != null, "coder can not be null");
       return builder().setCoder(coder).build();
     }
 
-    /** Specify the username for authentication. */
+    /**
+     * Specify the username for authentication.
+     */
     public ReadAll<T> withUsername(String username) {
       checkArgument(username != null, "username can not be null");
       return withUsername(ValueProvider.StaticValueProvider.of(username));
     }
 
-    /** Specify the username for authentication. */
+    /**
+     * Specify the username for authentication.
+     */
     public ReadAll<T> withUsername(ValueProvider<String> username) {
       return builder().setUsername(username).build();
     }
 
-    /** Specify the password used for authentication. */
+    /**
+     * Specify the password used for authentication.
+     */
     public ReadAll<T> withPassword(String password) {
       checkArgument(password != null, "password can not be null");
       return withPassword(ValueProvider.StaticValueProvider.of(password));
     }
 
-    /** Specify the password used for authentication. */
+    /**
+     * Specify the password used for authentication.
+     */
     public ReadAll<T> withPassword(ValueProvider<String> password) {
       return builder().setPassword(password).build();
     }
 
-    /** Specify the local DC used for the load balancing. */
+    /**
+     * Specify the local DC used for the load balancing.
+     */
     public ReadAll<T> withLocalDc(String localDc) {
       checkArgument(localDc != null, "localDc can not be null");
       return withLocalDc(ValueProvider.StaticValueProvider.of(localDc));
     }
 
-    /** Specify the local DC used for the load balancing. */
+    /**
+     * Specify the local DC used for the load balancing.
+     */
     public ReadAll<T> withLocalDc(ValueProvider<String> localDc) {
       return builder().setLocalDc(localDc).build();
     }
@@ -1053,32 +1104,29 @@ public class CassandraIO {
       return builder().setMapperFactoryFn(mapperFactory).build();
     }
 
+    //TODO:
+    //Change List<RingRange> to single RingRange.
+    //  Expand method should 'enrich and call grouping function in pardo', then 'groupbykey', then execute each one. send connectino info down in setup, then override if necessary
+
     @Override
-    public PCollection<T> expand(PCollection<RingRange> input) {
+    public PCollection<T> expand(PCollection<Read<T>> input) {
       checkArgument((hosts() != null && port() != null), "WithHosts() and withPort() are required");
       checkArgument(keyspace() != null, "withKeyspace() is required");
       checkArgument(table() != null, "withTable() is required");
       checkArgument(entity() != null, "withEntity() is required");
       checkArgument(coder() != null, "withCoder() is required");
       checkArgument(groupingFn() != null, "GroupingFn OR splitCount must be set");
-
       try (Cluster cluster =
           getCluster(hosts(), port(), username(), password(), localDc(), consistencyLevel())) {
-        return input
-            .apply(
-                "mapping for the grouping function",
-                MapElements.into(
-                        TypeDescriptors.kvs(
-                            TypeDescriptors.integers(), TypeDescriptor.of(RingRange.class)))
-                    .via(rr -> KV.of(groupingFn().apply(rr), rr)))
-            .apply("Grouping by grouping function", GroupByKey.create())
-            .apply(
-                "mapping to key",
-                MapElements.into(TypeDescriptors.iterables(TypeDescriptor.of(RingRange.class)))
-                    .via(kv -> kv.getValue()))
-            .apply("ParDo", ParDo.of(new ReadFn<>(getCassandraConfig())))
-            .setCoder(coder());
+        input.apply("pardo the enrich", ParDo.of(new SplitFn<T>())).apply("group by", GroupByKey.create()).apply("map back", );
+
+
+        //expandRingRanges(input).apply("Grouping", GroupByKey.create())
+        //    .apply("Turn into Read and enrich with connection info",
+        //));
+
       }
+      return null;
     }
 
     CassandraConfig<T> getCassandraConfig() {
@@ -1095,6 +1143,40 @@ public class CassandraIO {
           mapperFactoryFn(),
           entity());
     }
+
+    private class SplitFn<T> extends DoFn<Read<T>, KV<Integer, Read<T>>> {
+
+      @ProcessElement
+      public void processElement(@Element Read<T> read, OutputReceiver<KV<Integer, Read<T>>> output) {
+        Read<T> newRead = read;
+        if (read.hosts() == null) {
+          newRead = read.withHosts(ReadAll.this.hosts());
+        }
+        if (read.keyspace() == null) {
+          newRead = newRead.withKeyspace(ReadAll.this.keyspace());
+        }
+        if (read.username() == null) {
+          newRead = newRead.withUsername(ReadAll.this.username());
+        }
+        if (read.password() == null) {
+          newRead = newRead.withPassword(ReadAll.this.password());
+        }
+        if (read.port() == null) {
+          newRead = newRead.withPort(ReadAll.this.port());
+        }
+        if (read.table() == null) {
+          newRead = newRead.withTable(ReadAll.this.table());
+        }
+        if (ReadAll.this.groupingFn() != null) {
+          output.output(KV.of(ReadAll.this.groupingFn().apply(read.ringRange().get()), newRead));
+        } else {
+          output.output(KV
+              .of(read.ringRange().get().getStart().intValue() % read.minNumberOfSplits().get(),
+                  newRead));
+        }
+      }
+    }
+
 
     @AutoValue.Builder
     abstract static class Builder<T> {
