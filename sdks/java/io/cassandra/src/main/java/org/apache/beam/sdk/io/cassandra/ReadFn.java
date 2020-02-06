@@ -50,11 +50,11 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
         read.password(),
         read.localDc(),
         read.consistencyLevel())) {
-     try (Session session = cluster.connect(read.keyspace().get())) {
-       Mapper<T> mapper = read.mapperFactoryFn().apply(this.session);
-       String query = generateRangeQuery(read, partitionKey);
-       PreparedStatement preparedStatement = session.prepare(query);
-       for (RingRange rr : read.ringRanges().get()) {
+       try (Session session = cluster.connect(read.keyspace().get())) {
+         Mapper<T> mapper = read.mapperFactoryFn().apply(this.session);
+         String query = generateRangeQuery(read, partitionKey);
+         PreparedStatement preparedStatement = session.prepare(query);
+         RingRange rr = read.ringRange().get();
          Token startToken = cluster.getMetadata().newToken(rr.getStart().toString());
          Token endToken = cluster.getMetadata().newToken(rr.getEnd().toString());
          ResultSet rs =
@@ -63,7 +63,6 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
          while (iter.hasNext()) {
            receiver.output(iter.next());
          }
-       }
       }
     }
   }

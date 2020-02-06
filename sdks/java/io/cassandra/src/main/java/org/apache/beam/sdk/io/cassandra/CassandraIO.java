@@ -1104,10 +1104,6 @@ public class CassandraIO {
       return builder().setMapperFactoryFn(mapperFactory).build();
     }
 
-    //TODO:
-    //Change List<RingRange> to single RingRange.
-    //  Expand method should 'enrich and call grouping function in pardo', then 'groupbykey', then execute each one. send connectino info down in setup, then override if necessary
-
     @Override
     public PCollection<T> expand(PCollection<Read<T>> input) {
       checkArgument((hosts() != null && port() != null), "WithHosts() and withPort() are required");
@@ -1118,15 +1114,13 @@ public class CassandraIO {
       checkArgument(groupingFn() != null, "GroupingFn OR splitCount must be set");
       try (Cluster cluster =
           getCluster(hosts(), port(), username(), password(), localDc(), consistencyLevel())) {
-        input.apply("pardo the enrich", ParDo.of(new SplitFn<T>())).apply("group by", GroupByKey.create()).apply("map back", );
-
-
-        //expandRingRanges(input).apply("Grouping", GroupByKey.create())
-        //    .apply("Turn into Read and enrich with connection info",
-        //));
+        return input
+            .apply("enrich with connection info if necessary and split", ParDo.of(new SplitFn<T>()))
+            .apply("group by", GroupByKey.create())
+            .apply("output back to Reads", ParDo.of(new FlattenGrouped<T>()))
+            .apply("read", ParDo.of(new ReadFn<T>()));
 
       }
-      return null;
     }
 
     CassandraConfig<T> getCassandraConfig() {
@@ -1142,6 +1136,15 @@ public class CassandraIO {
           consistencyLevel(),
           mapperFactoryFn(),
           entity());
+    }
+
+    private static class FlattenGrouped<T> extends DoFn<KV<Integer, Iterable<Read<T>>>, Read<T>> {
+      @ProcessElement
+      public void processElement(@Element KV<Integer, Iterable<Read<T>>> kv, OutputReceiver<Read<T>> output) {
+        for (Read<T> read : kv.getValue()) {
+          output.output(read);
+        }
+      }
     }
 
     private class SplitFn<T> extends DoFn<Read<T>, KV<Integer, Read<T>>> {
@@ -1167,6 +1170,10 @@ public class CassandraIO {
         if (read.table() == null) {
           newRead = newRead.withTable(ReadAll.this.table());
         }
+        if(read.query() == null) {
+          newRead = newRead.withQuery(ReadAll.this.query());
+        }
+
         if (ReadAll.this.groupingFn() != null) {
           output.output(KV.of(ReadAll.this.groupingFn().apply(read.ringRange().get()), newRead));
         } else {
