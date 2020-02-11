@@ -299,13 +299,14 @@ public class CassandraIOTest implements Serializable {
   @Test
   public void testReadAll() {
     RingRange bioRR =
-        tokenBytesToRingRange(TypeCodec.varchar().serialize("bio", ProtocolVersion.V3));
+        RingRange.fromEncodedKey(cluster.getMetadata(), TypeCodec.varchar().serialize("bio", ProtocolVersion.V3));
+
     RingRange mathRR =
-        tokenBytesToRingRange(TypeCodec.varchar().serialize("math", ProtocolVersion.V3));
+        RingRange.fromEncodedKey(cluster.getMetadata(), TypeCodec.varchar().serialize("math", ProtocolVersion.V3));
 
     PCollection<Scientist> output =
         pipeline
-            .apply(Create.of(bioRR, mathRR))
+            .apply(Create.of(CassandraIO.<Scientist>read().withRingRange(bioRR), CassandraIO.<Scientist>read().withRingRange(mathRR)))
             .apply(
                 CassandraIO.<Scientist>readAll()
                     .withSlitCount(2)
@@ -494,11 +495,6 @@ public class CassandraIOTest implements Serializable {
     pipeline.run();
 
     assertEquals(1, counter.intValue());
-  }
-
-  private RingRange tokenBytesToRingRange(ByteBuffer bb) {
-    BigInteger bi = BigInteger.valueOf((long) cluster.getMetadata().newToken(bb).getValue());
-    return new RingRange(bi, bi.add(BigInteger.valueOf(1L)));
   }
 
   private List<Row> getRows(String table) {
