@@ -40,9 +40,12 @@ import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.SerializableCoder;
+import org.apache.beam.sdk.coders.VarIntCoder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
+import org.apache.beam.sdk.schemas.logicaltypes.EnumerationType.Value;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.FlatMapElements;
@@ -362,7 +365,7 @@ public class CassandraIO {
     }
 
     public Read<T> withRingRange(ValueProvider<RingRange> ringRange) {
-      return null;
+      return builder().setRingRange(ringRange).build();
     }
 
 
@@ -375,6 +378,10 @@ public class CassandraIO {
       checkArgument(coder() != null, "withCoder() is required");
       try (Cluster cluster =
           getCluster(hosts(), port(), username(), password(), localDc(), consistencyLevel())) {
+          Integer splitCount = cluster.getMetadata().getAllHosts().size();
+          if (minNumberOfSplits() != null && minNumberOfSplits().get() != null) {
+            splitCount = minNumberOfSplits().get();
+          }
           ReadAll<T> readAll = CassandraIO.<T>readAll()
               .withCoder(this.coder())
               .withConsistencyLevel(this.consistencyLevel())
@@ -386,7 +393,8 @@ public class CassandraIO {
               .withPassword(this.password())
               .withQuery(this.query())
               .withTable(this.table())
-              .withUsername(this.username());
+              .withUsername(this.username())
+              .withSplitCount(splitCount);
 
          if (isMurmur3Partitioner(cluster)) {
           LOG.info("Murmur3Partitioner detected, splitting");
@@ -399,10 +407,6 @@ public class CassandraIO {
           SplitGenerator splitGenerator =
               new SplitGenerator(cluster.getMetadata().getPartitioner());
 
-          Integer splitCount = cluster.getMetadata().getAllHosts().size();
-          if (minNumberOfSplits() != null && minNumberOfSplits().get() != null) {
-            splitCount = minNumberOfSplits().get();
-          }
          return input
               .apply(
                   "Creating splits", Create.of(splitGenerator.generateSplits(splitCount, tokens)))
@@ -432,21 +436,6 @@ public class CassandraIO {
           output.output(CassandraIO.<T>read().withRingRange(rr));
         }
       }
-    }
-
-    CassandraConfig<T> getCassandraConfig() {
-      return CassandraConfig.create(
-          hosts(),
-          query(),
-          port(),
-          keyspace(),
-          table(),
-          username(),
-          password(),
-          localDc(),
-          consistencyLevel(),
-          mapperFactoryFn(),
-          entity());
     }
 
     @AutoValue.Builder
@@ -1111,6 +1100,10 @@ public class CassandraIO {
       return builder().setSplitCount(splitCount).build();
     }
 
+    public ReadAll<T> withSplitCount(Integer splitCount) {
+      return withSplitCount(ValueProvider.StaticValueProvider.of(splitCount));
+    }
+
     public ReadAll<T> withSlitCount(Integer splitCount) {
       checkArgument(splitCount != null, "splitCount can not be null");
       return withSplitCount(ValueProvider.StaticValueProvider.<Integer>of(splitCount));
@@ -1138,11 +1131,14 @@ public class CassandraIO {
       try (Cluster cluster =
           getCluster(hosts(), port(), username(), password(), localDc(), consistencyLevel())) {
         return input
-            .apply("enrich with connection info if necessary and split", ParDo.of(new SplitFn<T>()))
+            .apply("enrich with connection info if necessary and split", ParDo.of(new SplitFn()))
+            //.setCoder(SerializableCoder.of(new TypeDescriptor<KV<Integer, Read<T>>>() {} ))
+            .setCoder(KvCoder.of(VarIntCoder.of(),  SerializableCoder.of(new TypeDescriptor<Read<T>>() {})))
             .apply("group by", GroupByKey.create())
             .apply("output back to Reads", ParDo.of(new FlattenGrouped<T>()))
             .setCoder(SerializableCoder.of(new TypeDescriptor<Read<T>>() {}))
-            .apply("read", ParDo.of(new ReadFn<T>()));
+            .apply("read", ParDo.of(new ReadFn<T>()))
+            .setCoder(this.coder());
 
       }
     }
@@ -1171,10 +1167,11 @@ public class CassandraIO {
       }
     }
 
-    private class SplitFn<T> extends DoFn<Read<T>, KV<Integer, Read<T>>> {
+    private class SplitFn extends DoFn<Read<T>, KV<Integer, Read<T>>> {
 
       @ProcessElement
       public void processElement(@Element Read<T> read, OutputReceiver<KV<Integer, Read<T>>> output) {
+        System.out.println("\n \n READ =====" + read);
         Read<T> newRead = read;
         if (read.hosts() == null) {
           newRead = read.withHosts(ReadAll.this.hosts());
@@ -1198,6 +1195,10 @@ public class CassandraIO {
           newRead = newRead.withQuery(ReadAll.this.query());
         }
 
+        if(read.mapperFactoryFn() == null) {
+          newRead = newRead.withMapperFactoryFn(ReadAll.this.mapperFactoryFn());
+        }
+
         if (ReadAll.this.groupingFn() != null) {
           output.output(KV.of(ReadAll.this.groupingFn().apply(read.ringRange().get()), newRead));
         } else {
@@ -1207,7 +1208,6 @@ public class CassandraIO {
         }
       }
     }
-
 
     @AutoValue.Builder
     abstract static class Builder<T> {

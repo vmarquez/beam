@@ -207,7 +207,7 @@ public class CassandraIOTest implements Serializable {
                   + "');",
               CASSANDRA_KEYSPACE,
               CASSANDRA_TABLE);
-      LOGGER.error("Error with str = " + insertStr);
+      //LOGGER.error("Error with str = " + insertStr);
       session.execute(insertStr);
     }
     flushMemTables();

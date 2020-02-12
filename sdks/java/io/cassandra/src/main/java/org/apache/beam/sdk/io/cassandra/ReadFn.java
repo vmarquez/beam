@@ -35,11 +35,7 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(ReadFn.class);
 
-  private transient Cluster cluster;
-
-  private transient Session session;
-
-  private String partitionKey;
+  //TODO: keep connection information cached
 
   @ProcessElement
   public void processElement(@Element Read<T> read, OutputReceiver<T> receiver) {
@@ -51,8 +47,14 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
         read.localDc(),
         read.consistencyLevel())) {
        try (Session session = cluster.connect(read.keyspace().get())) {
-         Mapper<T> mapper = read.mapperFactoryFn().apply(this.session);
+         String partitionKey =
+             cluster.getMetadata().getKeyspace(read.keyspace().get()).getTable(read.table().get())
+                 .getPartitionKey().stream()
+                 .map(ColumnMetadata::getName)
+                 .collect(Collectors.joining(","));
+         Mapper<T> mapper = read.mapperFactoryFn().apply(session);
          String query = generateRangeQuery(read, partitionKey);
+         System.out.println("          rangeQuery + " + query);
          PreparedStatement preparedStatement = session.prepare(query);
          RingRange rr = read.ringRange().get();
          Token startToken = cluster.getMetadata().newToken(rr.getStart().toString());
