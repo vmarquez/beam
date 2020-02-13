@@ -47,11 +47,20 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
         read.localDc(),
         read.consistencyLevel())) {
        try (Session session = cluster.connect(read.keyspace().get())) {
+         System.out.println(" ------------------------ ");
          String partitionKey =
              cluster.getMetadata().getKeyspace(read.keyspace().get()).getTable(read.table().get())
                  .getPartitionKey().stream()
                  .map(ColumnMetadata::getName)
                  .collect(Collectors.joining(","));
+         /*try {
+           System.out.println(" --- " + read.mapperFactoryFn());
+           Mapper<T> mapper2 = read.mapperFactoryFn().apply(session);
+
+         } catch (Exception ex) {
+           System.out.println("---- " + ex);
+           ex.printStackTrace();
+         }*/
          Mapper<T> mapper = read.mapperFactoryFn().apply(session);
          String query = generateRangeQuery(read, partitionKey);
          System.out.println("          rangeQuery + " + query);

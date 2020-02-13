@@ -394,7 +394,8 @@ public class CassandraIO {
               .withQuery(this.query())
               .withTable(this.table())
               .withUsername(this.username())
-              .withSplitCount(splitCount);
+              .withSplitCount(splitCount)
+              .withMapperFactoryFn(this.mapperFactoryFn());
 
          if (isMurmur3Partitioner(cluster)) {
           LOG.info("Murmur3Partitioner detected, splitting");
@@ -1132,7 +1133,6 @@ public class CassandraIO {
           getCluster(hosts(), port(), username(), password(), localDc(), consistencyLevel())) {
         return input
             .apply("enrich with connection info if necessary and split", ParDo.of(new SplitFn()))
-            //.setCoder(SerializableCoder.of(new TypeDescriptor<KV<Integer, Read<T>>>() {} ))
             .setCoder(KvCoder.of(VarIntCoder.of(),  SerializableCoder.of(new TypeDescriptor<Read<T>>() {})))
             .apply("group by", GroupByKey.create())
             .apply("output back to Reads", ParDo.of(new FlattenGrouped<T>()))
@@ -1196,6 +1196,7 @@ public class CassandraIO {
         }
 
         if(read.mapperFactoryFn() == null) {
+          System.out.println(" -------- \n \n -=------==--=--== mapper factory fun");
           newRead = newRead.withMapperFactoryFn(ReadAll.this.mapperFactoryFn());
         }
 
