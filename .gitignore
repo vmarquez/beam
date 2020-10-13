@@ -96,3 +96,4 @@ sdks/python/coverage.xml
 
 .pytest_cache
 .pytest_cache/**/*
+.metals/
