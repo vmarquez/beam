@@ -45,7 +45,6 @@ import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.SerializableCoder;
-import org.apache.beam.sdk.io.cassandra.CassandraIO.Read.Builder;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.transforms.Create;
@@ -397,102 +396,11 @@ public class CassandraIO {
       checkArgument(entity() != null, "withEntity() is required");
       checkArgument(coder() != null, "withCoder() is required");
 
-      ReadAll<T> readAll = CassandraIO.readAll();
-
-      return input
-          .apply(Create.of(this))
-          .apply("Split", ParDo.of(new SplitFn()))
-          .setCoder(SerializableCoder.of(new TypeDescriptor<Read<T>>() {}))
-          .apply("ReadAll", readAll.withCoder(this.coder()));
-    }
-
-    class SplitFn extends DoFn<Read<T>, Read<T>> {
-
-      private static final String MURMUR3PARTITIONER =
-          "org.apache.cassandra.dht.Murmur3Partitioner";
-
-      @ProcessElement
-      public void process(
-          @Element CassandraIO.Read<T> read, OutputReceiver<Read<T>> outputReceiver) {
-        Set<Set<RingRange>> ringRanges = getRingRanges(read);
-        for (Set<RingRange> rr : ringRanges) {
-          outputReceiver.output(
-              CassandraIO.<T>read()
-                  .withRingRanges(new HashSet<>(rr))
-                  .withCoder(coder())
-                  .withConsistencyLevel(consistencyLevel())
-                  .withEntity(entity())
-                  .withHosts(hosts())
-                  .withKeyspace(keyspace())
-                  .withLocalDc(localDc())
-                  .withPort(port())
-                  .withPassword(password())
-                  .withQuery(query())
-                  .withTable(table())
-                  .withUsername(username())
-                  .withMapperFactoryFn(mapperFactoryFn()));
-        }
-      }
-
-      Set<Set<RingRange>> getRingRanges(Read<T> read) {
-        if (read.ringRanges() == null || read.ringRanges().get() == null) {
-          try (Cluster cluster =
-              getCluster(
-                  read.hosts(),
-                  read.port(),
-                  read.username(),
-                  read.password(),
-                  read.localDc(),
-                  read.consistencyLevel(),
-                  read.connectTimeout(),
-                  read.readTimeout())) {
-            if (isMurmur3Partitioner(cluster)) {
-              LOG.info("Murmur3Partitioner detected, splitting");
-              Integer splitCount;
-              if (read.minNumberOfSplits() != null && read.minNumberOfSplits().get() != null) {
-                splitCount = read.minNumberOfSplits().get();
-              } else {
-                splitCount = cluster.getMetadata().getAllHosts().size();
-              }
-              List<BigInteger> tokens =
-                  cluster.getMetadata().getTokenRanges().stream()
-                      .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
-                      .collect(Collectors.toList());
-              SplitGenerator splitGenerator =
-                  new SplitGenerator(cluster.getMetadata().getPartitioner());
-
-              return splitGenerator.generateSplits(splitCount, tokens).stream()
-                  .map(l -> new HashSet<>(l))
-                  .collect(Collectors.toSet());
-
-            } else {
-              LOG.warn(
-                  "Only Murmur3Partitioner is supported for splitting, using an unique source for "
-                      + "the read");
-              String partitioner = cluster.getMetadata().getPartitioner();
-              RingRange totalRingRange =
-                  RingRange.of(
-                      SplitGenerator.getRangeMin(partitioner),
-                      SplitGenerator.getRangeMax(partitioner));
-              return new HashSet<>(
-                  Collections.<Set<RingRange>>singleton(
-                      new HashSet<>(Collections.singleton(totalRingRange))));
-            }
-          }
-        } else {
-          return Collections.singleton(read.ringRanges().get()).stream()
-              .collect(Collectors.toSet());
-        }
-      }
-
-      /**
-       * Check if the current partitioner is the Murmur3 (default in Cassandra version newer than
-       * 2).
-       */
-      @VisibleForTesting
-      boolean isMurmur3Partitioner(Cluster cluster) {
-        return MURMUR3PARTITIONER.equals(cluster.getMetadata().getPartitioner());
-      }
+      PCollection<Read<T>> splits =
+          input
+              .apply(Create.of(this))
+              .setCoder(SerializableCoder.of(new TypeDescriptor<Read<T>>() {}));
+      return splits.apply("ReadAll", (ReadAll<T>) readAll().withCoder((Coder<Object>) coder()));
     }
 
     @AutoValue.Builder
@@ -1053,10 +961,83 @@ public class CassandraIO {
     @Override
     public PCollection<T> expand(PCollection<Read<T>> input) {
       checkArgument(coder() != null, "withCoder() is required");
-      return input
+      PCollection<Read<T>> splits =
+          ((PCollection<Read<T>>) input.apply("Split", ParDo.of(new SplitFn())))
+              .setCoder(SerializableCoder.of(new TypeDescriptor<Read<T>>() {}));
+      return splits
           .apply("Reshuffle", Reshuffle.viaRandomKey())
           .apply("Read", ParDo.of(new ReadFn<>()))
           .setCoder(this.coder());
     }
+  }
+
+  private static class SplitFn<T> extends DoFn<Read<T>, Read<T>> {
+    @ProcessElement
+    public void process(@Element CassandraIO.Read<T> read, OutputReceiver<Read<T>> outputReceiver) {
+      Set<Set<RingRange>> ringRanges = getRingRanges(read);
+      for (Set<RingRange> rr : ringRanges) {
+        outputReceiver.output(read.withRingRanges(rr));
+      }
+    }
+
+    private static <T> Set<Set<RingRange>> getRingRanges(Read<T> read) {
+      if (read.ringRanges() == null || read.ringRanges().get() == null) {
+        try (Cluster cluster =
+            getCluster(
+                read.hosts(),
+                read.port(),
+                read.username(),
+                read.password(),
+                read.localDc(),
+                read.consistencyLevel(),
+                read.connectTimeout(),
+                read.readTimeout())) {
+          if (isMurmur3Partitioner(cluster)) {
+            LOG.info("Murmur3Partitioner detected, splitting");
+            Integer splitCount;
+            if (read.minNumberOfSplits() != null && read.minNumberOfSplits().get() != null) {
+              splitCount = read.minNumberOfSplits().get();
+            } else {
+              splitCount = cluster.getMetadata().getAllHosts().size();
+            }
+            List<BigInteger> tokens =
+                cluster.getMetadata().getTokenRanges().stream()
+                    .map(tokenRange -> new BigInteger(tokenRange.getEnd().getValue().toString()))
+                    .collect(Collectors.toList());
+            SplitGenerator splitGenerator =
+                new SplitGenerator(cluster.getMetadata().getPartitioner());
+
+            return splitGenerator.generateSplits(splitCount, tokens).stream()
+                .map(HashSet::new)
+                .collect(Collectors.toSet());
+
+          } else {
+            LOG.warn(
+                "Only Murmur3Partitioner is supported for splitting, using an unique source for "
+                    + "the read");
+            String partitioner = cluster.getMetadata().getPartitioner();
+            RingRange totalRingRange =
+                RingRange.of(
+                    SplitGenerator.getRangeMin(partitioner),
+                    SplitGenerator.getRangeMax(partitioner));
+            return new HashSet<>(
+                Collections.<Set<RingRange>>singleton(
+                    new HashSet<>(Collections.singleton(totalRingRange))));
+          }
+        }
+      } else {
+        return new HashSet<>(Collections.singleton(read.ringRanges().get()));
+      }
+    }
+
+    /**
+     * Check if the current partitioner is the Murmur3 (default in Cassandra version newer than 2).
+     */
+    @VisibleForTesting
+    private static boolean isMurmur3Partitioner(Cluster cluster) {
+      return MURMUR3PARTITIONER.equals(cluster.getMetadata().getPartitioner());
+    }
+
+    private static final String MURMUR3PARTITIONER = "org.apache.cassandra.dht.Murmur3Partitioner";
   }
 }

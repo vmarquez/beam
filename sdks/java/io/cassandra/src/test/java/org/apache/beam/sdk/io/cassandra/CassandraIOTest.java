@@ -30,6 +30,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 
 import com.datastax.driver.core.Cluster;
+import com.datastax.driver.core.Metadata;
 import com.datastax.driver.core.ProtocolVersion;
 import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Row;
@@ -45,6 +46,8 @@ import info.archinnov.achilles.embedded.CassandraEmbeddedServerBuilder;
 import info.archinnov.achilles.embedded.CassandraShutDownHook;
 import java.io.IOException;
 import java.io.Serializable;
+import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -352,7 +355,6 @@ public class CassandraIOTest implements Serializable {
         String.format(
             "SELECT * From %s.%s WHERE person_department='math' AND person_id=6;",
             CASSANDRA_KEYSPACE, CASSANDRA_TABLE);
-    ;
 
     PCollection<Scientist> output =
         pipeline
@@ -376,15 +378,15 @@ public class CassandraIOTest implements Serializable {
   @Test
   public void testReadAllRingRange() {
     RingRange physRR =
-        RingRange.fromEncodedKey(
+        fromEncodedKey(
             cluster.getMetadata(), TypeCodec.varchar().serialize("phys", ProtocolVersion.V3));
 
     RingRange mathRR =
-        RingRange.fromEncodedKey(
+        fromEncodedKey(
             cluster.getMetadata(), TypeCodec.varchar().serialize("math", ProtocolVersion.V3));
 
     RingRange logicRR =
-        RingRange.fromEncodedKey(
+        fromEncodedKey(
             cluster.getMetadata(), TypeCodec.varchar().serialize("logic", ProtocolVersion.V3));
 
     PCollection<Scientist> output =
@@ -658,6 +660,11 @@ public class CassandraIOTest implements Serializable {
     public int hashCode() {
       return Objects.hashCode(name, id);
     }
+  }
+
+  private static RingRange fromEncodedKey(Metadata metadata, ByteBuffer... bb) {
+    BigInteger bi = BigInteger.valueOf((long) metadata.newToken(bb).getValue());
+    return RingRange.of(bi, bi.add(BigInteger.valueOf(1L)));
   }
 
   private static final String CASSANDRA_TABLE_WRITE = "scientist_write";

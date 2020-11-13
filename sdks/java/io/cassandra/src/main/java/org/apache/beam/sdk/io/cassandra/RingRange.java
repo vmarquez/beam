@@ -17,7 +17,6 @@
  */
 package org.apache.beam.sdk.io.cassandra;
 
-import com.datastax.driver.core.Metadata;
 import java.io.Serializable;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
@@ -27,6 +26,9 @@ import org.apache.beam.sdk.annotations.Experimental.Kind;
 
 /** Models a Cassandra token range. */
 @Experimental(Kind.SOURCE_SINK)
+@SuppressWarnings({
+  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+})
 public final class RingRange implements Serializable {
   private final BigInteger start;
   private final BigInteger end;
@@ -65,11 +67,6 @@ public final class RingRange implements Serializable {
 
   public static RingRange of(BigInteger start, BigInteger end) {
     return new RingRange(start, end);
-  }
-
-  public static RingRange fromEncodedKey(Metadata metadata, ByteBuffer... bb) {
-    BigInteger bi = BigInteger.valueOf((long) metadata.newToken(bb).getValue());
-    return new RingRange(bi, bi.add(BigInteger.valueOf(1L)));
   }
 
   @Override

@@ -34,8 +34,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 @SuppressWarnings({
+<<<<<<< HEAD
     "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
     "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+=======
+  "rawtypes", // TODO(https://issues.apache.org/jira/browse/BEAM-10556)
+  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+>>>>>>> [BEAM-9008] Move splitting to ReadAll expansion and minor improvements
 })
 class ReadFn<T> extends DoFn<Read<T>, T> {
 
@@ -54,7 +59,7 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
     String query = generateRangeQuery(read, partitionKey, read.ringRanges() != null);
     PreparedStatement preparedStatement = session.prepare(query);
     Set<RingRange> ringRanges =
-        read.ringRanges() == null ? Collections.<RingRange>emptySet() : read.ringRanges().get();
+        read.ringRanges() == null ? Collections.emptySet() : read.ringRanges().get();
 
     for (RingRange rr : ringRanges) {
       Token startToken = session.getCluster().getMetadata().newToken(rr.getStart().toString());
