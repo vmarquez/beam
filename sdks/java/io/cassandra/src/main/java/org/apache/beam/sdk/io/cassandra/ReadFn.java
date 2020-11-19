@@ -48,37 +48,40 @@ class ReadFn<T> extends DoFn<Read<T>, T> {
 
   @ProcessElement
   public void processElement(@Element Read<T> read, OutputReceiver<T> receiver) {
-    Session session = getSession(read);
-    Mapper<T> mapper = read.mapperFactoryFn().apply(session);
-    String partitionKey =
-        session.getCluster().getMetadata().getKeyspace(read.keyspace().get())
-            .getTable(read.table().get()).getPartitionKey().stream()
-            .map(ColumnMetadata::getName)
-            .collect(Collectors.joining(","));
+    try (Session session = getSession(read)) {
+      Mapper<T> mapper = read.mapperFactoryFn().apply(session);
+      String partitionKey =
+          session.getCluster().getMetadata().getKeyspace(read.keyspace().get())
+              .getTable(read.table().get()).getPartitionKey().stream()
+              .map(ColumnMetadata::getName)
+              .collect(Collectors.joining(","));
 
-    String query = generateRangeQuery(read, partitionKey, read.ringRanges() != null);
-    PreparedStatement preparedStatement = session.prepare(query);
-    Set<RingRange> ringRanges =
-        read.ringRanges() == null ? Collections.emptySet() : read.ringRanges().get();
+      String query = generateRangeQuery(read, partitionKey, read.ringRanges() != null);
+      PreparedStatement preparedStatement = session.prepare(query);
+      Set<RingRange> ringRanges =
+          read.ringRanges() == null ? Collections.emptySet() : read.ringRanges().get();
 
-    for (RingRange rr : ringRanges) {
-      Token startToken = session.getCluster().getMetadata().newToken(rr.getStart().toString());
-      Token endToken = session.getCluster().getMetadata().newToken(rr.getEnd().toString());
-      ResultSet rs =
-          session.execute(preparedStatement.bind().setToken(0, startToken).setToken(1, endToken));
-      Iterator<T> iter = mapper.map(rs);
-      while (iter.hasNext()) {
-        T n = iter.next();
-        receiver.output(n);
+      for (RingRange rr : ringRanges) {
+        Token startToken = session.getCluster().getMetadata().newToken(rr.getStart().toString());
+        Token endToken = session.getCluster().getMetadata().newToken(rr.getEnd().toString());
+        ResultSet rs =
+            session.execute(preparedStatement.bind().setToken(0, startToken).setToken(1, endToken));
+        Iterator<T> iter = mapper.map(rs);
+        while (iter.hasNext()) {
+          T n = iter.next();
+          receiver.output(n);
+        }
       }
-    }
 
-    if (read.ringRanges() == null) {
-      ResultSet rs = session.execute(preparedStatement.bind());
-      Iterator<T> iter = mapper.map(rs);
-      while (iter.hasNext()) {
-        receiver.output(iter.next());
+      if (read.ringRanges() == null) {
+        ResultSet rs = session.execute(preparedStatement.bind());
+        Iterator<T> iter = mapper.map(rs);
+        while (iter.hasNext()) {
+          receiver.output(iter.next());
+        }
       }
+    } catch (Exception ex) {
+      LOG.error("error", ex);
     }
   }
 

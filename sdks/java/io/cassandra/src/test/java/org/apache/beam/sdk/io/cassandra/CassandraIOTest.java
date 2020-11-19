@@ -372,6 +372,7 @@ public class CassandraIOTest implements Serializable {
                   }
                 }));
     PAssert.that(mapped).containsInAnyOrder("Einstein", "Newton");
+    PAssert.thatSingleton(output.apply("count", Count.globally())).isEqualTo(2L);
     pipeline.run();
   }
 
@@ -431,6 +432,7 @@ public class CassandraIOTest implements Serializable {
                 .withPort(cassandraPort)
                 .withKeyspace(CASSANDRA_KEYSPACE)
                 .withTable(CASSANDRA_TABLE)
+                .withMinNumberOfSplits(20)
                 .withQuery(
                     "select person_id, writetime(person_name) from beam_ks.scientist where person_id=10 AND person_department='logic'")
                 .withCoder(SerializableCoder.of(Scientist.class))
