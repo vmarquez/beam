@@ -18,14 +18,6 @@
 package org.apache.beam.sdk.io.cassandra;
 
 import static junit.framework.TestCase.assertTrue;
-import static org.apache.beam.sdk.io.cassandra.CassandraIO.CassandraSource.distance;
-import static org.apache.beam.sdk.io.cassandra.CassandraIO.CassandraSource.getEstimatedSizeBytesFromTokenRanges;
-import static org.apache.beam.sdk.io.cassandra.CassandraIO.CassandraSource.getRingFraction;
-import static org.apache.beam.sdk.io.cassandra.CassandraIO.CassandraSource.isMurmur3Partitioner;
-import static org.apache.beam.sdk.testing.SourceTestUtils.readFromSource;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.greaterThan;
-import static org.hamcrest.Matchers.lessThan;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 
@@ -372,6 +364,7 @@ public class CassandraIOTest implements Serializable {
                   }
                 }));
     PAssert.that(mapped).containsInAnyOrder("Einstein", "Newton");
+    PAssert.thatSingleton(output.apply("count", Count.globally())).isEqualTo(2L);
     pipeline.run();
   }
 
@@ -431,6 +424,7 @@ public class CassandraIOTest implements Serializable {
                 .withPort(cassandraPort)
                 .withKeyspace(CASSANDRA_KEYSPACE)
                 .withTable(CASSANDRA_TABLE)
+                .withMinNumberOfSplits(20)
                 .withQuery(
                     "select person_id, writetime(person_name) from beam_ks.scientist where person_id=10 AND person_department='logic'")
                 .withCoder(SerializableCoder.of(Scientist.class))
