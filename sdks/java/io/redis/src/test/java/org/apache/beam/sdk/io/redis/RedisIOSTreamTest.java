@@ -21,6 +21,7 @@ import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PDone;
 import org.apache.beam.sdk.values.TypeDescriptor;
 import org.apache.beam.sdk.values.TypeDescriptors;
+import org.apache.beam.vendor.grpc.v1p26p0.com.google.protobuf.DescriptorProtos.UninterpretedOption;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Rule;
@@ -64,7 +65,7 @@ public class RedisIOSTreamTest implements Serializable {
   }
 
   @Test
-  public void testReadStream() {
+  public void testReadStream() throws InterruptedException {
     String tempKey = "temp_key";
     String tempGroup = "temp_group";
     List<Map<String, String>> data = buildIncrementalData(100);
@@ -80,7 +81,7 @@ public class RedisIOSTreamTest implements Serializable {
         .apply("write test", new WriteTest()); 
 
     //PAssert.that(pcoll).containsInAnyOrder(data);
-    p.run();
+    p.run().wait(5000);
 
   }
   public static class WriteTest extends PTransform<PCollection<StreamEntry>, PDone> {
@@ -89,7 +90,7 @@ public class RedisIOSTreamTest implements Serializable {
     public PDone expand(PCollection<StreamEntry> input) {
       return input.apply("map to strings", MapElements.into(TypeDescriptors.strings()).via(se -> fieldToString(se)))
       .apply("window", Window.into(FixedWindows.of(org.joda.time.Duration.standardSeconds(1))))
-      .apply("write", TextIO.write().to("LocalDir/").withWindowedWrites().withNumShards(1));
+      .apply("write", TextIO.write().to("/Users/vincentmarquez/RedisStreamTest/").withWindowedWrites().withNumShards(1));
     }
 
     public String fieldToString(StreamEntry se) {
