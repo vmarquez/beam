@@ -1,5 +1,6 @@
 package org.apache.beam.sdk.io.redis;
 
+import java.io.IOException;
 import java.io.Serializable;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -9,6 +10,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
+import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.testing.PAssert;
@@ -65,7 +67,7 @@ public class RedisIOSTreamTest implements Serializable {
   }
 
   @Test
-  public void testReadStream() throws InterruptedException {
+  public void testReadStream() throws InterruptedException, IOException {
     String tempKey = "temp_key";
     String tempGroup = "temp_group";
     List<Map<String, String>> data = buildIncrementalData(100);
@@ -80,8 +82,13 @@ public class RedisIOSTreamTest implements Serializable {
         .withMaxNumRecords(10))
         .apply("write test", new WriteTest()); 
 
-    //PAssert.that(pcoll).containsInAnyOrder(data);
-    p.run().wait(5000);
+    PipelineResult readResult = p.run();
+    PipelineResult.State readState =
+        readResult.waitUntilFinish(org.joda.time.Duration.standardSeconds(4));
+
+    if (readState == null)
+      readResult.cancel();
+
 
   }
   public static class WriteTest extends PTransform<PCollection<StreamEntry>, PDone> {
