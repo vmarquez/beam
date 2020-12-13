@@ -2,9 +2,9 @@ package org.apache.beam.sdk.io.redis;
 
 import java.io.Serializable;
 import java.util.AbstractMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
 import java.util.Map.Entry;
 
@@ -12,12 +12,7 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.SerializableCoder;
 import org.apache.beam.sdk.io.redis.RedisStreamFn.StreamDescriptor;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.DoFn.GetInitialRestriction;
-import org.apache.beam.sdk.transforms.DoFn.NewTracker;
-import org.apache.beam.sdk.transforms.DoFn.ProcessElement;
-import org.apache.beam.sdk.transforms.DoFn.Restriction;
 import org.apache.beam.sdk.transforms.DoFn.UnboundedPerElement;
-import org.apache.beam.sdk.transforms.reflect.DoFnSignature.Parameter.FinishBundleContextParameter;
 import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
 import org.apache.beam.sdk.transforms.splittabledofn.SplitResult;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -33,6 +28,9 @@ import org.slf4j.LoggerFactory;
 import org.slf4j.Logger;
 
 @UnboundedPerElement
+@SuppressWarnings({
+  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+})
 public class RedisStreamFn extends DoFn<StreamDescriptor, StreamEntry> {
 
   private static final Logger LOG = LoggerFactory.getLogger(RedisStreamFn.class);
@@ -44,7 +42,7 @@ public class RedisStreamFn extends DoFn<StreamDescriptor, StreamEntry> {
   private final Long limit;
 
   public RedisStreamFn(RedisConnectionConfiguration redisConnectionConfiguration, long limit) {
-    System.out.println("in the redisStreamFn");
+    System.out.println("in the redisStreamFn long = " + limit);
     this.config = redisConnectionConfiguration;
     this.limit = limit;
   }
@@ -61,53 +59,50 @@ public class RedisStreamFn extends DoFn<StreamDescriptor, StreamEntry> {
   
   @GetInitialRestriction
   public RedisStreamRestriction initialRestriction(@Element StreamDescriptor sd) {
-    return new RedisStreamRestriction(StreamEntryID.LAST_ENTRY, sd.getConsumerName());
+    return new RedisStreamRestriction(StreamEntryID.UNRECEIVED_ENTRY, sd.getConsumerName());
   }
 
   @NewTracker
   public RestrictionTracker<RedisStreamRestriction, StreamEntryID> getNewRestrictionTracker(@Restriction RedisStreamRestriction restriction) {
     return new RedisStreamResrictionTracker(restriction);
   }
-
-  @FinishBundle
-  public void finalizeBundle(BundleFinalizer finalizer, FinishBundleContextParameter contextParameter) {
-    finalizer.afterBundleCommit(Instant.now(), () -> System.out.println("hello")); 
-    //contextParameter.
-
-  }
-
+ 
   @ProcessElement
-  public ProcessContinuation processElement(@Element StreamDescriptor sd, RestrictionTracker<RedisStreamRestriction, StreamEntryID> tracker, OutputReceiver<StreamEntry> receiver) {
+  public ProcessContinuation processElement(@Element StreamDescriptor sd, RestrictionTracker<RedisStreamRestriction, StreamEntryID> tracker, OutputReceiver<StreamEntry> receiver, BundleFinalizer finalizer) {
      Map.Entry<String, StreamEntryID> mapEntry = new AbstractMap.SimpleImmutableEntry<>(sd.getKey(),
           StreamEntryID.UNRECEIVED_ENTRY);
     createConsumerGroup(tracker.currentRestriction().getPosition(), sd);
-    int x =0;
-    while (x < 10) {
-      x++;
-      System.out.println("looping");
+    finalizer.afterBundleCommit(Instant.now().plus(5 * 1000), () -> commitAcks(sd)); 
+    long x = 0;
+    while (true) {
+      System.out.println("looping, current restriction =" + tracker.currentRestriction().getPosition());
+      if (limit != null && x >= limit) {
+        return ProcessContinuation.stop();
+      }
       try { 
-        List<StreamEntry> entries = jedis
-              .xreadGroup(sd.getGroupName(), "consumername", sd.batchSize, 1000, true, mapEntry)
-              .stream()
-              .flatMap(entry -> entry.getValue().stream())
-              .collect(Collectors.toList());
-        System.out.println("entires = " + entries);
-        if (entries.isEmpty()) {
+        List<Entry<String, List<StreamEntry>>> entries = jedis
+              .xreadGroup(sd.getGroupName(), sd.getConsumerName(), sd.getBatchSize(), 1000, true, mapEntry);
+        if ((entries == null || entries.isEmpty()) && limit == null) {
           return ProcessContinuation.resume();
         }
-        for (StreamEntry se : entries) {
-            if (tracker.tryClaim(se.getID())) {
-              Instant instant = Instant.now();
-              receiver.outputWithTimestamp(se, instant);
-            } else {
-              return ProcessContinuation.stop();
-            }
+       
+        List<StreamEntry> flattened = entries.stream().flatMap(se -> se.getValue().stream()).collect(Collectors.toList());
+        for (StreamEntry se : flattened) { 
+          if (tracker.tryClaim(se.getID())) {
+            x++;
+            Instant instant = Instant.now();
+            System.out.println("    ooo output = " + se);
+            receiver.outputWithTimestamp(se, instant);
+            toAck.add(se.getID());
+          } else {
+            return ProcessContinuation.stop();
+          }
         }
       } catch (Exception ex) {
-        LOG.error("error pulling data from redis for " + sd.getKey(), ex);
+        LOG.error("error pulling data from redis for " + sd.getKey() + " for my id = " + this.hashCode(), ex);
+        return ProcessContinuation.stop();
       }
     }
-    return ProcessContinuation.stop();
   }
 
   public static class StreamDescriptor implements Serializable {
@@ -147,8 +142,16 @@ public class RedisStreamFn extends DoFn<StreamDescriptor, StreamEntry> {
   }
 
   ////////private
+  private transient List<StreamEntryID> toAck = new ArrayList<>();
 
+
+  private void commitAcks(StreamDescriptor sd) {
+    toAck.forEach(sid -> jedis.xack(sd.getKey(), sd.getGroupName(), sid));
+    toAck.clear();
+  }
+ 
   void createConsumerGroup(StreamEntryID offset, StreamDescriptor sd) {
+    System.out.println("creating consumer Group " + sd.getConsumerName() + " for my current sd = " + sd.hashCode() + " For the splittabledofn of " + this.hashCode());
     try {
       jedis.xgroupCreate(sd.getKey(), sd.getGroupName(), new StreamEntryID(), true);
     } catch (JedisDataException ex) {
@@ -159,7 +162,10 @@ public class RedisStreamFn extends DoFn<StreamDescriptor, StreamEntry> {
         ex.printStackTrace();
       }
     }
-    jedis.xgroupSetID(sd.getKey(), sd.getGroupName(), offset);
+    System.out.println("setting the offset = " + offset);
+    StreamEntryID id = offset.toString().equals(">") ? new StreamEntryID() : offset;
+        System.out.println("setting the offset = " + id);
+    jedis.xgroupSetID(sd.getKey(), sd.getGroupName(), id);
   }
 
   public static class RedisStreamRestriction implements Serializable {

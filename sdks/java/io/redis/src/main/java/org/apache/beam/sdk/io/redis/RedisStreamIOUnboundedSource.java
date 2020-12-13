@@ -25,7 +25,9 @@ import redis.clients.jedis.Jedis;
 import redis.clients.jedis.StreamEntry;
 import redis.clients.jedis.StreamEntryID;
 import redis.clients.jedis.exceptions.JedisDataException;
-
+@SuppressWarnings({
+  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
+})
 public class RedisStreamIOUnboundedSource extends
     UnboundedSource<StreamEntry, RedisCheckpointMarker> {
 
