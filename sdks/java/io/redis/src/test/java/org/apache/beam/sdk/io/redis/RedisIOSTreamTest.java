@@ -75,8 +75,6 @@ public class RedisIOSTreamTest implements Serializable {
 
   @Test
   public void testReadStream() throws InterruptedException, IOException {
-    String tempKey = "temp_key";
-    String tempGroup = "temp_group";
     List<Map<String, String>> data = buildIncrementalData(0, 10);
     System.out.println("list size = " + data.size()); 
     data.stream().forEach(map -> client.xadd(REDIS_KEY, StreamEntryID.NEW_ENTRY, map));
@@ -90,20 +88,18 @@ public class RedisIOSTreamTest implements Serializable {
         readResult.waitUntilFinish(org.joda.time.Duration.standardSeconds(4));
   }
 
-
   /*
   * This test will read half of a queue, then finish the pipeline, 
   * then should be able to run a second pipeline picking back from where it left off
   */
   @Test
   public void testReadStreamAfterRestart() throws InterruptedException, IOException {
-    String newKey = "temp_key";
-    String tempGroup = "temp_group";
+    String newKey = REDIS_KEY + "restart";
     List<Map<String, String>> data1 = buildIncrementalData(0, 5);
 
     List<Map<String, String>> data2 = buildIncrementalData(5, 5);
-    data1.stream().forEach(map -> client.xadd(REDIS_KEY, StreamEntryID.NEW_ENTRY, map));
-    data2.stream().forEach(map -> client.xadd(REDIS_KEY, StreamEntryID.NEW_ENTRY, map));
+    data1.stream().forEach(map -> client.xadd(newKey, StreamEntryID.NEW_ENTRY, map));
+    data2.stream().forEach(map -> client.xadd(newKey, StreamEntryID.NEW_ENTRY, map));
 
     data2.stream().forEach(map -> System.out.println("data2 = " + map.toString()));
 

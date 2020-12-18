@@ -5,6 +5,7 @@ import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.Map.Entry;
 
@@ -58,61 +59,93 @@ public class RedisStreamFn extends DoFn<StreamDescriptor, StreamEntry> {
   }
   
   @GetInitialRestriction
-  public RedisStreamRestriction initialRestriction(@Element StreamDescriptor sd) {
-    return new RedisStreamRestriction(StreamEntryID.UNRECEIVED_ENTRY, sd.getConsumerName());
+  public StreamConsumer initialRestriction(@Element StreamDescriptor sd) {
+    return sd.getConsumerName();
   }
 
   @NewTracker
-  public RestrictionTracker<RedisStreamRestriction, StreamEntryID> getNewRestrictionTracker(@Restriction RedisStreamRestriction restriction) {
+  public RestrictionTracker<StreamConsumer, StreamEntryID> getNewRestrictionTracker(@Restriction StreamConsumer restriction) {
     return new RedisStreamResrictionTracker(restriction);
   }
- 
+
   @ProcessElement
-  public ProcessContinuation processElement(@Element StreamDescriptor sd, RestrictionTracker<RedisStreamRestriction, StreamEntryID> tracker, OutputReceiver<StreamEntry> receiver, BundleFinalizer finalizer) {
-     Map.Entry<String, StreamEntryID> mapEntry = new AbstractMap.SimpleImmutableEntry<>(sd.getKey(),
-          StreamEntryID.UNRECEIVED_ENTRY);
-    createConsumerGroup(tracker.currentRestriction().getPosition(), sd);
-    finalizer.afterBundleCommit(Instant.now().plus(5 * 1000), () -> commitAcks(sd)); 
-    long x = 0;
-    while (true) {
-      System.out.println("looping, current restriction =" + tracker.currentRestriction().getPosition());
-      if (limit != null && x >= limit) {
-        return ProcessContinuation.stop();
-      }
-      try { 
-        List<Entry<String, List<StreamEntry>>> entries = jedis
-              .xreadGroup(sd.getGroupName(), sd.getConsumerName(), sd.getBatchSize(), 1000, true, mapEntry);
-        if ((entries == null || entries.isEmpty()) && limit == null) {
-          return ProcessContinuation.resume();
+  public ProcessContinuation processElement(@Element StreamDescriptor sd, RestrictionTracker<StreamConsumer, StreamEntryID> tracker, OutputReceiver<StreamEntry> receiver, BundleFinalizer finalizer) {
+    createConsumerGroup(sd);
+    finalizer.afterBundleCommit(Instant.now().plus(5 * 1000), () -> commitAcks(sd));
+    if (this.toAck == null) {
+      System.out.println("WOW ITS NULL");
+      this.toAck = new ArrayList<>();
+    } 
+    StreamEntryID fetchId = new StreamEntryID();
+    int x = 0;
+    while (x < 10) {
+      x++;
+      try {
+        if (limit != null && this.elementCount >= limit) {
+          System.out.println("about to call systme.exit");
+          return ProcessContinuation.stop(); //keepFetch == false?
         }
-       
-        List<StreamEntry> flattened = entries.stream().flatMap(se -> se.getValue().stream()).collect(Collectors.toList());
-        for (StreamEntry se : flattened) { 
-          if (tracker.tryClaim(se.getID())) {
-            x++;
-            Instant instant = Instant.now();
-            System.out.println("    ooo output = " + se);
-            receiver.outputWithTimestamp(se, instant);
-            toAck.add(se.getID());
-          } else {
-            return ProcessContinuation.stop();
-          }
+        List<StreamEntry> entries = getStreamEntrys(jedis, sd, fetchId);
+        System.out.println("entries = " + entries);
+        
+        if ((entries == null || entries.isEmpty()) && fetchId.equals(new StreamEntryID())) {
+            fetchId = StreamEntryID.UNRECEIVED_ENTRY;
         }
+        
+        entries.forEach(se -> {
+          System.out.println("trying to output here ="+ se.toString()); 
+          elementCount++;
+          tracker.tryClaim(se.getID());
+          receiver.outputWithTimestamp(se, Instant.now());
+          toAck.add(se.getID());
+        });
+        elementCount++;
       } catch (Exception ex) {
-        LOG.error("error pulling data from redis for " + sd.getKey() + " for my id = " + this.hashCode(), ex);
+        ex.printStackTrace();
+        System.out.println("ex = " + ex);
         return ProcessContinuation.stop();
       }
+    }
+    return ProcessContinuation.stop();
+  }
+
+  //TODO: move to private
+
+  @GetRestrictionCoder
+  public Coder<StreamConsumer> restrictionCoder() {
+    return SerializableCoder.of(StreamConsumer.class);
+  }
+
+  public static class StreamConsumer implements Serializable {
+    private static final long serialVersionUID = 1L;
+    private final String name;
+    private final int count;
+    public StreamConsumer(String name, int count) {
+      this.name = name;
+      this.count = count;
+    }
+    public String getName() {
+      return name;
+    }
+
+    public int getCount() {
+      return count;
+    }
+
+    @Override
+    public String toString() {
+      return name + count;
     }
   }
 
   public static class StreamDescriptor implements Serializable {
     private static final long serialVersionUID = 1L;
     private final String key;
-    private final String consumerName;
+    private final StreamConsumer consumerName;
     private final String groupName;
     private final int batchSize;
 
-    public StreamDescriptor(String key, String consumerName, String groupName, int batchSize) {
+    public StreamDescriptor(String key, StreamConsumer consumerName, String groupName, int batchSize) {
       this.key = key;
       this.consumerName = consumerName;
       this.groupName = groupName;
@@ -123,7 +156,7 @@ public class RedisStreamFn extends DoFn<StreamDescriptor, StreamEntry> {
       return key;
     }
 
-    public String getConsumerName() {
+    public StreamConsumer getConsumerName() {
       return consumerName;
     }
 
@@ -136,98 +169,70 @@ public class RedisStreamFn extends DoFn<StreamDescriptor, StreamEntry> {
     }
   }
 
-  @GetRestrictionCoder
-  public Coder<RedisStreamRestriction> restrictionCoder() {
-    return SerializableCoder.of(RedisStreamRestriction.class);
-  }
-
+  
   ////////private
   private transient List<StreamEntryID> toAck = new ArrayList<>();
 
+  private long elementCount = 0;
+
+  public static List<StreamEntry> getStreamEntrys(Jedis jedis, StreamDescriptor sd, StreamEntryID fetchId) {
+    Map.Entry<String, StreamEntryID> mapEntry = new AbstractMap.SimpleImmutableEntry<>(sd.getKey(),
+            fetchId);
+            System.out.println(" fetching wtih key " + sd.getKey() + " and fetchId = " + fetchId);
+    List<Map.Entry<String, List<StreamEntry>>> list = Optional.ofNullable(jedis
+            .xreadGroup(sd.getGroupName(), sd.getConsumerName().toString(), sd.getBatchSize(), 1000, false, mapEntry)).orElse(new ArrayList<>());
+    return list.stream().flatMap(se -> se.getValue().stream()).collect(Collectors.toList());
+  }
 
   private void commitAcks(StreamDescriptor sd) {
     toAck.forEach(sid -> jedis.xack(sd.getKey(), sd.getGroupName(), sid));
     toAck.clear();
   }
  
-  void createConsumerGroup(StreamEntryID offset, StreamDescriptor sd) {
+  private void createConsumerGroup(StreamDescriptor sd) {
     System.out.println("creating consumer Group " + sd.getConsumerName() + " for my current sd = " + sd.hashCode() + " For the splittabledofn of " + this.hashCode());
     try {
       jedis.xgroupCreate(sd.getKey(), sd.getGroupName(), new StreamEntryID(), true);
     } catch (JedisDataException ex) {
       if (ex.getMessage().contains("name already exists")) {
         System.out.println("already exists");
-      } else {
-        System.out.println("JedisDataException = " + ex);
-        ex.printStackTrace();
       }
     }
-    System.out.println("setting the offset = " + offset);
-    StreamEntryID id = offset.toString().equals(">") ? new StreamEntryID() : offset;
-        System.out.println("setting the offset = " + id);
-    jedis.xgroupSetID(sd.getKey(), sd.getGroupName(), id);
   }
 
-  public static class RedisStreamRestriction implements Serializable {
+  static class RedisStreamResrictionTracker extends
+        RestrictionTracker<StreamConsumer, StreamEntryID> implements Serializable {
+ 
     private static final long serialVersionUID = 1L;
 
-    private final StreamEntryID position;
-    
-    private final String consumerName;
+    StreamEntryID current = new StreamEntryID();
 
-    public RedisStreamRestriction(StreamEntryID position, String consumerName) {
-      this.position = position;
-      this.consumerName = consumerName;
-    }
+      StreamConsumer streamConsumer;
 
-    public StreamEntryID getPosition() {
-      return position;
-    }
-
-    public String getConsumerName() {
-      return consumerName;
-    }
-  }
-
-  /* Redis sharding is controlled serverside by the consumer name. Redis Stream IDs are not monotonitcally increasing */
-  static class RedisStreamResrictionTracker extends
-        RestrictionTracker<RedisStreamRestriction, StreamEntryID> implements Serializable {
- 
-      StreamEntryID current;
-
-      String consumerName;
-
-      public RedisStreamResrictionTracker(RedisStreamRestriction restriction) {          
-        this.current = restriction.getPosition();
-        this.consumerName = restriction.getConsumerName();
-      }
-
-      public RedisStreamResrictionTracker(String consumerName) {
-
+      public RedisStreamResrictionTracker(StreamConsumer streamConsumer) {          
+        this.streamConsumer = streamConsumer;
       }
 
       @Override
       public boolean tryClaim(StreamEntryID position) {
+        //check to flip the switch to new
         this.current = position;
         return true;
       }
 
       @Override
-      public RedisStreamRestriction currentRestriction() {
-        return new RedisStreamRestriction(current, consumerName);
+      public StreamConsumer currentRestriction() {
+        return this.streamConsumer; 
       }
 
       @Override
-      public @Nullable SplitResult<RedisStreamRestriction> trySplit(double fractionOfRemainder) {
-        RedisStreamRestriction newRestriction = new RedisStreamRestriction(StreamEntryID.UNRECEIVED_ENTRY, consumerName + UUID.randomUUID().toString());
-        RedisStreamRestriction currentRestriction = new RedisStreamRestriction(current, consumerName);
-        return SplitResult.of(currentRestriction, newRestriction);
+      public @Nullable SplitResult<StreamConsumer> trySplit(double fractionOfRemainder) {
+        //TODO: do we need the split to also check for ACKSs?
+        return SplitResult.of(this.streamConsumer, new StreamConsumer(this.streamConsumer.getName(), this.streamConsumer.getCount()+1));
       }
 
       @Override
-      public void checkDone() throws IllegalStateException {
-
-      }
+      public void checkDone() throws IllegalStateException {}
 
       @Override
       public IsBounded isBounded() {

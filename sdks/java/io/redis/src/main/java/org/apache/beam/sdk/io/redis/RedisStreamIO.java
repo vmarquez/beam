@@ -10,6 +10,7 @@ import com.google.auto.value.AutoValue;
 import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.annotations.Experimental.Kind;
 import org.apache.beam.sdk.io.UnboundedSource;
+import org.apache.beam.sdk.io.redis.RedisStreamFn.StreamConsumer;
 import org.apache.beam.sdk.io.redis.RedisStreamFn.StreamDescriptor;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.PTransform;
@@ -120,7 +121,7 @@ public class RedisStreamIO {
       System.out.println("-------- woot here we go --------------------- -" + keyPattern());
       System.out.println("max number of records = " + this.maxNumRecords());
       String consumerPrefix = UUID.randomUUID().toString();
-      Stream<StreamDescriptor> streamDescriptors = IntStream.of(this.consumerCount()).mapToObj(i -> new StreamDescriptor(this.keyPattern(), consumerPrefix + "-" + i, this.groupId(), batchSize()));
+      Stream<StreamDescriptor> streamDescriptors = IntStream.of(this.consumerCount()).mapToObj(i -> new StreamDescriptor(this.keyPattern(), new StreamConsumer(consumerPrefix, i), this.groupId(), batchSize()));
       return input.apply(Create.of(streamDescriptors.collect(Collectors.toList())))
       .apply("now read fn", ParDo.of(new RedisStreamFn(this.connectionConfiguration(), this.maxNumRecords())));
      }
