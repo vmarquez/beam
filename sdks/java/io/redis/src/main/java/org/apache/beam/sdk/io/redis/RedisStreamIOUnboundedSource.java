@@ -1,18 +1,28 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.apache.beam.sdk.io.redis;
 
 import java.io.IOException;
 import java.io.Serializable;
-import java.util.AbstractMap;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedList;
 import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.NoSuchElementException;
 import java.util.Optional;
-import java.util.Queue;
 import java.util.stream.Collectors;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.SerializableCoder;
@@ -20,29 +30,32 @@ import org.apache.beam.sdk.io.UnboundedSource;
 import org.apache.beam.sdk.io.redis.RedisStreamIOUnboundedSource.RedisCheckpointMarker;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.checkerframework.checker.nullness.qual.Nullable;
-import org.joda.time.Instant;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.StreamEntry;
 import redis.clients.jedis.StreamEntryID;
 import redis.clients.jedis.exceptions.JedisDataException;
 
-public class RedisStreamIOUnboundedSource extends
-    UnboundedSource<StreamEntry, RedisCheckpointMarker> {
+public class RedisStreamIOUnboundedSource
+    extends UnboundedSource<StreamEntry, RedisCheckpointMarker> {
 
   @Override
   public List<? extends UnboundedSource<StreamEntry, RedisCheckpointMarker>> split(
       int desiredNumSplits, PipelineOptions options) throws Exception {
-
-    //FIXME: make this parallell
-    return Collections.singleton(this).stream().collect(Collectors.toList());
+    // TODO: loop and return various consumernames with loop count + prefix
+    // FIXME: make this parallell
+    RedisStreamIOUnboundedSource source =
+        new RedisStreamIOUnboundedSource(redisKey, timeout, groupId, config, consumerPrefix + "1");
+    return Collections.singleton(source).stream().collect(Collectors.toList());
   }
 
   @Override
-  public UnboundedReader<StreamEntry> createReader(PipelineOptions options,
-      @Nullable RedisCheckpointMarker checkpointMark) throws IOException {
+  public UnboundedReader<StreamEntry> createReader(
+      PipelineOptions options, @Nullable RedisCheckpointMarker checkpointMark) throws IOException {
     System.out.println("creating reader with checkpointMark = " + checkpointMark);
-    createConsumerGroup(Optional.ofNullable(checkpointMark).map(cp -> cp.getLastRead()));
-    return new RedisStreamReader(redisKey, groupId, this, config);
+    createConsumerGroup(); // Optional.ofNullable(checkpointMark).map(cp -> cp.getLastRead()));
+    StreamEntryID startFrom =
+        Optional.ofNullable(checkpointMark).map(cp -> cp.getLastRead()).orElse(new StreamEntryID());
+    return new RedisStreamReader(redisKey, groupId, this, config, startFrom, consumerPrefix);
   }
 
   @Override
@@ -64,14 +77,22 @@ public class RedisStreamIOUnboundedSource extends
 
   private final String groupId;
 
-  public RedisStreamIOUnboundedSource(String redisKey, long timeout, String groupId, RedisConnectionConfiguration config) {
+  private final String consumerPrefix;
+
+  public RedisStreamIOUnboundedSource(
+      String redisKey,
+      long timeout,
+      String groupId,
+      RedisConnectionConfiguration config,
+      String consumerPrefix) {
     this.config = config;
     this.redisKey = redisKey;
     this.timeout = timeout;
     this.groupId = groupId;
+    this.consumerPrefix = consumerPrefix;
   }
 
-  public void createConsumerGroup(Optional<StreamEntryID> offset) {
+  public void createConsumerGroup() {
     System.out.println("create consumergroup groupId = " + groupId + " key =" + redisKey);
     Jedis jedis = new Jedis(config.host().get(), config.port().get());
     try {
@@ -84,150 +105,42 @@ public class RedisStreamIOUnboundedSource extends
         ex.printStackTrace();
       }
     }
-    //since we aren't doing ACKs, if we crash and need to start over from a previously read point, we do so here
-    //FIXME: for multiple streams
-    offset.ifPresent(streamEntryID -> System.out.println("Going to set xgroupSetId to " + streamEntryID));
-    offset.ifPresent(streamEntryID -> jedis.xgroupSetID(redisKey, groupId, streamEntryID));
+    // since we aren't doing ACKs, if we crash and need to start over from a previously read point,
+    // we do so here
+    // FIXME: for multiple streams
+    // offset.ifPresent(streamEntryID -> System.out.println("Going to set xgroupSetId to " +
+    // streamEntryID));
+    // offset.ifPresent(streamEntryID -> jedis.xgroupSetID(redisKey, groupId, streamEntryID));
   }
 
-
-  //TODO: make it work for a map of StreamEntries
+  // TODO: make it work for a map of StreamEntries
   public static class RedisCheckpointMarker implements CheckpointMark, Serializable {
 
-    private final StreamEntryID lastRead;
+    RedisStreamReader streamReader;
 
-    public RedisCheckpointMarker(StreamEntryID lastRead) {
-      this.lastRead = lastRead;
+    final ArrayList<StreamEntryID> toAck;
+
+    public RedisCheckpointMarker(RedisStreamReader streamReader, ArrayList<StreamEntryID> toAck) {
+      System.out.println("I'm being made!" + hashCode() + " toAck size = " + toAck.size());
+      this.streamReader = streamReader;
+      this.toAck = new ArrayList<>(toAck);
+      System.out.println("StreamReader = " + streamReader.hashCode());
+      System.out.println("toAck = " + this.toAck.size() + " for hashCode = " + this.hashCode());
     }
 
     public StreamEntryID getLastRead() {
-      return this.lastRead;
+      if (this.toAck.size() < 1) {
+        return new StreamEntryID();
+      } else {
+        return this.toAck.get(this.toAck.size() - 1);
+      }
     }
 
     @Override
     public void finalizeCheckpoint() throws IOException {
-      //should we commit back here?
-    }
-  }
-
-  public static class RedisStreamReader extends UnboundedReader<StreamEntry> {
-
-    @Override
-    public boolean start() throws IOException {
-      System.out.println("Start");
-      return advance();
-    }
-
-    //TODO: make this dump to a simple  queue,
-
-    @Override
-    public boolean advance() throws IOException {
-      System.out.println("------\n \n \n -0----");
-      if (queue.isEmpty() && !fetchNextBatch()) {
-        return false;
-      } else {
-        System.out.println("queue size = " + queue.size());
-        currentStreamEntry = Optional.ofNullable(queue.poll());
-        return true;
-      }
-    }
-
-    @Override
-    public StreamEntry getCurrent() throws NoSuchElementException {
-      System.out.println("GETCurrent");
-      if (currentStreamEntry.isPresent()) {
-        //this.nextId = currentStreamEntry.map(se -> se.getID());
-        return this.currentStreamEntry.get();
-
-      } else {
-        System.out.println("NoSUchElementException + " + queue.size());
-        throw new NoSuchElementException();
-      }
-    }
-
-    @Override
-    public Instant getCurrentTimestamp() throws NoSuchElementException {
-      if (this.currentStreamEntry.isPresent()) {
-        return Instant.ofEpochMilli(this.currentStreamEntry.get().getID().getTime());
-      } else {
-        throw new NoSuchElementException();
-      }
-    }
-
-    @Override
-    public void close() throws IOException {
-      jedis.close();
-    }
-
-    @Override
-    public Instant getWatermark() {
-      return Instant.now();
-      //return null;
-    }
-
-    //QUESTION: better to return null?
-    @Override
-    public CheckpointMark getCheckpointMark() {
-      System.out.println("getCHeckpointMark for " + this.hashCode() + " + currentstreamEntry = " + this.currentStreamEntry);
-      return new RedisCheckpointMarker(this.currentStreamEntry.map(se -> se.getID()).orElseGet(() -> StreamEntryID.UNRECEIVED_ENTRY));
-
-    }
-
-    @Override
-    public UnboundedSource<StreamEntry, ?> getCurrentSource() {
-      return redisSource;
-    }
-
-    ///////////////////
-    private final Jedis jedis;
-
-    private final RedisStreamIOUnboundedSource redisSource;
-
-    private final RedisConnectionConfiguration config;
-
-    private final String key;
-
-    private final String groupId;
-
-    private Optional<StreamEntry> currentStreamEntry = Optional.empty();
-
-    private final Queue<StreamEntry> queue;
-
-    //private Optional<StreamEntryID> nextId = Optional.of(StreamEntryID.UNRECEIVED_ENTRY);
-
-    public RedisStreamReader(String key, String groupId, RedisStreamIOUnboundedSource source,
-        RedisConnectionConfiguration config) {
-      this.redisSource = source;
-      this.jedis = new Jedis(config.host().get(), config.port().get());
-      this.config = config;
-      this.key = key;
-      this.groupId = groupId;
-      this.queue = new ArrayDeque<>();
-    }
-
-    private boolean fetchNextBatch() {
-      Map.Entry<String, StreamEntryID> mapEntry = new AbstractMap.SimpleImmutableEntry<>(key,
-          StreamEntryID.UNRECEIVED_ENTRY);
-
-      System.out.println("fetchNextBatch for " + this.hashCode() + " XREADGROUP GROUP " + groupId + " consumername " + " COUNT BLOCK 1000 STREAMS " + key);
-      //FIXME: consumername should be based on teh split #
-      List<Entry<String, List<StreamEntry>>> entries = jedis
-          .xreadGroup(groupId, "consumername", 1, 1000, true, mapEntry);
-
-      if (entries == null || isEmpty(entries)) {
-        System.out.println("    EMPTY!!!!");
-        return false;
-      } else {
-        System.out.println("    NOT EMPTY");
-
-        queue.addAll(
-            entries.stream().flatMap(se -> se.getValue().stream()).collect(Collectors.toList()));
-        return true;
-      }
-    }
-
-    private boolean isEmpty(List<Entry<String, List<StreamEntry>>> list) {
-      return list.stream().mapToLong(e -> e.getValue().size()).sum() == 0;
+      System.out.println(
+          "finalize checkPoint toAck size" + toAck.size() + " hashCode = " + hashCode());
+      streamReader.commitAcks(toAck);
     }
   }
 }

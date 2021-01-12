@@ -1,3 +1,20 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.apache.beam.sdk.io.redis;
 
 import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
@@ -11,6 +28,7 @@ import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.checkerframework.checker.nullness.qual.Nullable;
+import org.joda.time.Duration;
 import redis.clients.jedis.StreamEntry;
 
 @Experimental(Kind.SOURCE_SINK)
@@ -33,11 +51,12 @@ public class RedisStreamIO {
 
     abstract long maxNumRecords();
 
+    abstract String consumerPrefix();
+
     @AutoValue.Builder
     abstract static class Builder {
 
-      abstract Builder setConnectionConfiguration(
-          RedisConnectionConfiguration connection);
+      abstract Builder setConnectionConfiguration(RedisConnectionConfiguration connection);
 
       abstract @Nullable Builder setKeyPattern(String keyPattern);
 
@@ -48,6 +67,8 @@ public class RedisStreamIO {
       abstract @Nullable Builder setGroupId(String groupId);
 
       abstract Builder setMaxNumRecords(long records);
+
+      abstract Builder setConsumerPrefix(String prefix);
 
       abstract ReadStream build();
     }
@@ -97,18 +118,25 @@ public class RedisStreamIO {
       return toBuilder().setMaxNumRecords(recordSize).build();
     }
 
+    public ReadStream withConsumerPrefix(String prefix) {
+      return toBuilder().setConsumerPrefix(prefix).build();
+    }
+
     @Override
     public PCollection<StreamEntry> expand(PBegin input) {
       checkArgument(connectionConfiguration() != null, "withConnectionConfiguration is required");
       System.out.println("-------- woot here we go --------------------- -" + keyPattern());
-      UnboundedSource<StreamEntry, RedisCheckpointMarker> unbounded = new RedisStreamIOUnboundedSource(
-          keyPattern(), timeout(), groupId(),
-          connectionConfiguration());
+      UnboundedSource<StreamEntry, RedisCheckpointMarker> unbounded =
+          new RedisStreamIOUnboundedSource(
+              keyPattern(), timeout(), groupId(), connectionConfiguration(), consumerPrefix());
       if (this.maxNumRecords() == Long.MAX_VALUE) {
         return input.apply("creating source", org.apache.beam.sdk.io.Read.from(unbounded));
       } else {
-        return input.apply("creating source",
-            org.apache.beam.sdk.io.Read.from(unbounded).withMaxNumRecords(maxNumRecords()));
+        return input.apply(
+            "creating source",
+            org.apache.beam.sdk.io.Read.from(unbounded)
+                .withMaxNumRecords(maxNumRecords())
+                .withMaxReadTime(Duration.standardSeconds(30)));
       }
     }
   }
@@ -118,6 +146,7 @@ public class RedisStreamIO {
         .setConnectionConfiguration(RedisConnectionConfiguration.create())
         .setTimeout(1000)
         .setBatchSize(1)
+        .setConsumerPrefix("beam_consumer_prefix")
         .setMaxNumRecords(Long.MAX_VALUE)
         .build();
   }
